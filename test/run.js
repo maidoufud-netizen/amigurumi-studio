@@ -8,6 +8,7 @@ import {
 import { planRound, spreadOps, clampForCoupling, buildPartFromProfile, PRESETS, idealCounts, normalizeProfile } from '../src/build.js';
 import { formatOps, toText, expandOps } from '../src/pattern.js';
 import { validatePattern } from '../src/validate.js';
+import { layoutChart, chartToSVG, chartStats } from '../src/chart.js';
 
 let pass = 0;
 let fail = 0;
@@ -146,6 +147,59 @@ function createPatternWith(part) {
   ] })));
   ok(t.includes('6X') && t.includes('6V'), '文字图解包含 6X / 6V');
   ok(t.includes('起立针/引拔针不计入针数'), '文字图解显式声明了立针约定');
+}
+
+// ---------- 8. 图解布局与渲染（chart.js） ----------
+{
+  const counts = [6, 12, 18, 24, 30, 24, 18, 12, 6];
+  const rounds = [{ n: 1, ops: [{ op: 'sc', count: 6 }] }];
+  for (let i = 1; i < counts.length; i++) rounds.push(planRound(counts[i - 1], counts[i], i + 1));
+  const ball = createPart({ id: 'ball', rounds });
+
+  const L = layoutChart(ball);
+  eq(L.ok, true, '球体图解可以定位');
+  eq(L.rings.length, counts.length, '环数 == 圈数');
+
+  const opsCounts = rounds.map(roundOps);
+  eq(L.rings.map((r) => r.stitches.length), counts, '每环针目数 == 该圈针数 cₙ（拓扑正确，下一圈靠它定位）');
+  eq(L.rings.map((r) => r.glyphs.length), opsCounts, '每环绘图符号数 == 该圈操作数（加针两针合一符号）');
+
+  let mono = true;
+  for (let i = 1; i < L.rings.length; i++) if (L.rings[i].r <= L.rings[i - 1].r) mono = false;
+  ok(mono, '半径单调递增（圈与圈必须嵌套）');
+
+  let arcOk = true;
+  for (const ring of L.rings) {
+    if ((2 * Math.PI * ring.r) / ring.stitches.length < 7.19) arcOk = false;
+  }
+  ok(arcOk, '每针弧长 ≥ cell（60 针的圈不会挤成一团）');
+
+  eq(L.rings[0].stitches[0].angle, 0, '第 1 圈首针角度为 0（正上方起针）');
+
+  const totalOps = opsCounts.reduce((a, b) => a + b, 0);
+  const { svg } = chartToSVG(ball);
+  ok(svg.startsWith('<svg'), 'SVG 以 <svg 开头');
+  ok(svg.trimEnd().endsWith('</svg>'), 'SVG 正确闭合');
+  ok((svg.match(/<path/g) || []).length >= totalOps, `SVG 的 path 数不少于总针数 ${totalOps}`);
+  ok(!svg.includes('fill="#0'), '符号无填充色（纯线稿）');
+
+  // 不可钩的图解必须被拒绝，且给出原因
+  const bad = createPart({
+    id: 'bad',
+    rounds: [
+      { n: 1, ops: [{ op: 'sc', count: 6 }] },
+      { n: 2, ops: [{ op: 'sc', count: 4 }, { op: 'inc', count: 1 }] },
+    ],
+  });
+  const LB = layoutChart(bad);
+  eq(LB.ok, false, '漏针的图解无法定位');
+  ok(typeof LB.error === 'string' && LB.error.length > 0, '拒绝定位时给出原因');
+
+  const st = chartStats(ball);
+  eq(st.rounds, counts.length, 'chartStats 圈数正确');
+  eq(st.peak, 30, 'chartStats 峰值正确');
+  eq(st.peakRound, 5, 'chartStats 峰值所在圈正确');
+  eq(st.last, 6, 'chartStats 收口正确');
 }
 
 // ---------- 结果 ----------

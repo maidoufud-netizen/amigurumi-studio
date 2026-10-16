@@ -11,7 +11,7 @@ flowchart TB
   E["④ 加减针布局 spreadOps<br/>尽量均匀 → 正圆"]
   IR["IR · 唯一真源<br/>Round[] : ops = [sc | inc | dec] × count"]
   T["文字图解<br/>6X / (X,V)×6"]
-  S["符号图 SVG<br/>v0.2 待实现"]
+  S["符号图解 SVG<br/>环形符号图 ✅"]
   V3["3D 预览<br/>回转体 + 逐圈高亮"]
   VF["校验器 validatePattern<br/>12 条规则"]
   R["结论：可钩 / 不可钩"]
@@ -83,7 +83,7 @@ flowchart LR
 | 生成 | [`src/build.js`](../src/build.js) | 剖面 → 针数序列；耦合夹紧；加减针均匀布局；**偏差量化** | ✅ |
 | 校验 | [`src/validate.js`](../src/validate.js) | 12 条规则，V003 为硬闸门 | ✅ |
 | 输出·文字 | [`src/pattern.js`](../src/pattern.js) | 最小周期检测 → `6X` / `(X,V)×6` | ✅ |
-| 输出·符号 | `src/chart.js` | 符号图 SVG（CYC / 日式） | ⬜ v0.2 |
+| 输出·符号 | [`src/chart.js`](../src/chart.js) | 环形符号图 SVG：每针按"它穿在哪一针上"定位，不做平均分角度 | ✅ |
 | 输出·3D | [`web/app.js`](../web/app.js) | three.js 回转体 + 逐圈高亮 + 侧视对照 | ✅ |
 | 参数 | `gauge {w, h}` | 线材/钩针/手劲带来的真实尺度，**必须可标定** | ⬜ v0.4 |
 
@@ -106,10 +106,10 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  N1["v0.2 符号图 SVG"] --> N2["v0.4 gauge 标定与回填"]
-  N2 --> N3["v0.5 实物照片比对<br/>轮廓叠加 → 差异可视化"]
-  N3 --> N4["分件与接缝<br/>头/身/手/脚 + 拓扑"]
-  N4 --> N5["v0.6 照片/多视角<br/>→ 网格 → 剖面 → 分件"]
+  N1["v0.4 gauge 标定与回填"] --> N2["v0.5 实物照片比对<br/>轮廓叠加 → 差异可视化"]
+  N2 --> N3["v0.6 提示词 → 形状参数<br/>AI 只输出受限 JSON"]
+  N3 --> N4["v0.7 分件与接缝<br/>头/身/手/脚 + 拓扑"]
+  N4 --> N5["v0.8 图片剪影 → 剖面<br/>→ v0.9 照片/多视角 → 网格"]
 ```
 
 v0.4 是关键一步：**钩完两圈量实物，把真实 `w/h` 填回来**，预览立刻校正 ——

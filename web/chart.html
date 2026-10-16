@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>图解可视化 · 玩偶图解工作台</title>
+<style>
+  :root{ --ink:#0f172a; --ink2:#334155; --muted:#64748b; --line:#e2e8f0; --bg:#f7f9fc; --card:#fff; --brand:#2563eb; }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font:15px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif;color:var(--ink);background:var(--bg)}
+  header{padding:14px 20px;background:#0f2557;color:#fff;display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+  header h1{font-size:17px;font-weight:700}
+  header span{font-size:13px;color:#93c5fd}
+  header a{color:#bfdbfe;font-size:13px;text-decoration:none;border-bottom:1px dashed rgba(191,219,254,.5)}
+  main{display:grid;grid-template-columns:minmax(300px,360px) 1fr;gap:16px;padding:16px;align-items:start}
+  @media (max-width:900px){ main{grid-template-columns:1fr} }
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px}
+  .card+.card{margin-top:14px}
+  .card h2{font-size:13px;font-weight:700;color:var(--brand);letter-spacing:.4px;margin-bottom:10px;text-transform:uppercase}
+  label{display:block;font-size:13px;color:var(--ink2);margin:10px 0 4px;font-weight:600}
+  select,textarea{width:100%;border:1px solid var(--line);border-radius:8px;padding:8px 10px;font:13px/1.6 ui-monospace,Consolas,monospace;color:var(--ink);background:#fff}
+  textarea{min-height:120px;resize:vertical}
+  input[type=range]{width:100%;accent-color:var(--brand)}
+  .row{display:flex;gap:10px}
+  .row>*{flex:1}
+  .val{font-variant-numeric:tabular-nums;color:var(--brand);font-weight:700}
+  button{background:var(--brand);color:#fff;border:0;border-radius:8px;padding:9px 14px;font-size:14px;font-weight:600;cursor:pointer}
+  button.ghost{background:#fff;color:var(--ink2);border:1px solid var(--line)}
+  #chart{display:flex;justify-content:center;align-items:center;min-height:320px;overflow:auto;background:#fff;border-radius:10px}
+  #chart svg{max-width:100%;height:auto}
+  .legend{display:flex;gap:18px;font-size:13px;color:var(--ink2);margin-top:10px;flex-wrap:wrap;align-items:center}
+  .legend i{display:inline-block;width:16px;height:16px;vertical-align:-3px;margin-right:5px}
+  pre{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:12px;font:12px/1.65 ui-monospace,Consolas,monospace;overflow:auto;max-height:300px;white-space:pre}
+  .hint{font-size:12px;color:var(--muted);margin-top:8px}
+  #info{font-size:13px;color:var(--ink2);margin-top:10px}
+  @media print{
+    header,aside,.legend,#patternCard{display:none!important}
+    main{display:block;padding:0}
+    .card{border:0;padding:0}
+    #chart svg{width:100%;height:auto}
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>图解可视化</h1>
+  <span>每个符号画在它真正穿的那一针上 —— 结构不撒谎</span>
+  <a href="./index.html">← 回到 3D 预览</a>
+</header>
+
+<main>
+  <aside>
+    <div class="card">
+      <h2>形状</h2>
+      <label>预设</label>
+      <select id="preset">
+        <option value="ball">球 · 头/身</option>
+        <option value="teardrop">水滴 · 身体</option>
+        <option value="cone">锥 · 手/腿</option>
+        <option value="cylinder">直筒</option>
+      </select>
+      <div class="row">
+        <div>
+          <label>针宽 w <span class="val" id="wv">5.0</span> mm</label>
+          <input type="range" id="w" min="2" max="12" step="0.5" value="5">
+        </div>
+        <div>
+          <label>针高 h <span class="val" id="hv">5.0</span> mm</label>
+          <input type="range" id="h" min="2" max="12" step="0.5" value="5">
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>剖面曲线（高度mm, 半径mm）</h2>
+      <textarea id="profile" spellcheck="false"></textarea>
+      <div style="margin-top:10px;display:flex;gap:8px">
+        <button id="apply">重新生成</button>
+        <button id="reset" class="ghost">回到预设</button>
+        <button id="print" class="ghost">打印</button>
+      </div>
+      <div class="hint">改这里的控制点，图解会立刻重画。圈号·针数标在正上方（如 <code>4·24</code> 表示第 4 圈共 24 针）。</div>
+    </div>
+
+    <div class="card" id="patternCard">
+      <h2>对应文字图解</h2>
+      <pre id="pattern">—</pre>
+    </div>
+  </aside>
+
+  <section>
+    <div class="card">
+      <h2>符号图解</h2>
+      <div id="chart">—</div>
+      <div class="legend">
+        <span><i><svg width="16" height="16" viewBox="0 0 16 16"><path d="M4 4 L12 12 M12 4 L4 12" stroke="#111827" stroke-width="1.6" fill="none" stroke-linecap="round"/></svg></i>× 短针</span>
+        <span><i><svg width="16" height="16" viewBox="0 0 16 16"><path d="M4 4 L8 12 L12 4" stroke="#111827" stroke-width="1.6" fill="none" stroke-linejoin="round"/></svg></i>V 加针（一针出两针）</span>
+        <span><i><svg width="16" height="16" viewBox="0 0 16 16"><path d="M4 12 L8 4 L12 12 M5.6 12.8 L10.4 12.8" stroke="#111827" stroke-width="1.6" fill="none" stroke-linejoin="round"/></svg></i>A 减针（两针并一针）</span>
+      </div>
+      <div id="info"></div>
+      <div class="hint">同心圆是圈引导线；从内到外依次是第 1 圈到最后一圈。加针密集处会自然显现，不会被平均化抹平。</div>
+    </div>
+  </section>
+</main>
+
+<script type="module" src="./chart.js"></script>
+</body>
+</html>
