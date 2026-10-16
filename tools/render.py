@@ -282,9 +282,15 @@ LINK_COLOR = {                       # 按边的类型着色，一眼看出结�
 }
 
 
-def render_graph(scene, size=(900, 900), yaw=38.0, pitch=16.0, ss=2,
+NODE_PAST = (91, 140, 200)
+NODE_CURRENT = (232, 154, 60)
+NODE_FUTURE = (185, 198, 214)
+NODE_CHAIN = (217, 138, 82)
+
+
+def render_graph(scene, size=(900, 900), yaw=38.0, pitch=16.0, ss=2, current=0,
                  background=(248, 250, 252), node_scale=0.22, margin=1.14):
-    """球棍模型：节点 = 针目，连线 = 耦合关系。"""
+    """球棍模型：节点 = 针目，连线 = 耦合关系。current = 高亮第几圈（0 = 不高亮）"""
     nodes = scene["nodes"]
     links = scene["links"]
     if not nodes:
@@ -330,7 +336,16 @@ def render_graph(scene, size=(900, 900), yaw=38.0, pitch=16.0, ss=2,
         else:
             p, n = payload
             r = max(1.2 * ss, node_scale * stitch * focal / max(p[2], 1e-3))
-            base = (226, 150, 88) if n.get("chain") else (86, 122, 176)
+            if n.get("chain"):
+                base = NODE_CHAIN
+            else:
+                rnd = n.get("round", 0)
+                if current and rnd == current:
+                    base = NODE_CURRENT
+                elif current and rnd < current:
+                    base = NODE_PAST
+                else:
+                    base = NODE_FUTURE if current else NODE_PAST
             draw.ellipse([p[0] - r, p[1] - r, p[0] + r, p[1] + r],
                          fill=tuple(int(c * fade) for c in base))
 

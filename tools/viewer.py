@@ -26,7 +26,7 @@ import tkinter as tk
 from tkinter import ttk
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from render import render, render_chart  # noqa: E402
+from render import render, render_chart, render_graph  # noqa: E402
 
 from PIL import ImageTk  # noqa: E402
 
@@ -48,8 +48,11 @@ class App:
 
         self.yaw, self.pitch, self.zoom = 38.0, 16.0, 1.14
         self.scene = None
+        self.graph = None
+        self.graph_path = os.path.join(HERE, "graph.json")
         self.photo3d = None
         self.photo_chart = None
+        self.photo_graph = None
         self._drag = None
         self._jobs = {}
 
@@ -62,7 +65,62 @@ class App:
         self._build_footer()
 
         self.load_scene()
+        self.load_graph()
         self.redraw_all()
+        # 有拓扑图时先给拓扑图页签，省得手动切
+        if self.graph:
+            self.nb.select(self.tabgraph)
+
+    # ────────────────────────── 拓扑图（力导向） ──────────────────────────
+
+    def load_graph(self):
+        if os.path.exists(self.graph_path):
+            try:
+                with open(self.graph_path, encoding="utf-8") as f:
+                    self.graph = json.load(f)
+            except Exception:  # noqa: BLE001
+                self.graph = None
+
+    def generate_graph(self):
+        which = "octopus" if self.graph_box.current() == 0 else "sphere"
+        script = os.path.join(HERE, "emit-graph.mjs")
+        try:
+            proc = subprocess.run(
+                [self.node_exe, script, which, self.graph_path],
+                cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=120,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.status.config(text=f"调用 Node 失败：{exc}")
+            return
+        if proc.returncode != 0:
+            self.status.config(text="拓扑图生成失败")
+            self.notes.config(text=(proc.stderr or proc.stdout or "")[-400:])
+            return
+        self.load_graph()
+        self.status.config(text="拓扑图已生成")
+        self.redraw_graph(fine=True)
+
+    def redraw_graph(self, fine=True):
+        if not self.graph:
+            return
+        w = max(320, self.canvas_graph.winfo_width())
+        h = max(240, self.canvas_graph.winfo_height())
+        img = render_graph(self.graph, size=(w, h), yaw=self.yaw, pitch=self.pitch,
+                           ss=2 if fine else 1, margin=self.zoom)
+        self.photo_graph = ImageTk.PhotoImage(img)
+        if self.item_graph is None:
+            self.item_graph = self.canvas_graph.create_image(0, 0, anchor="nw", image=self.photo_graph)
+        else:
+            self.canvas_graph.itemconfig(self.item_graph, image=self.photo_graph)
+        s = self.graph.get("summary", {})
+        self.notes.config(
+            text=f"拓扑图：{self.graph.get('name', '')} · "
+                 f"{len(self.graph['nodes'])} 节点 / {len(self.graph['links'])} 边 · "
+                 f"包围半径 {s.get('radius', 0):.1f}mm · "
+                 f"{'已收敛' if self.graph.get('converged') else '未收敛'}"
+                 f"（{self.graph.get('ticks', 0)} 步）　"
+                 f"节点=针目，连线=耦合；橙色=分支（触手），蓝色=主体"
+        )
 
     # ────────────────────────── 界面 ──────────────────────────
 
@@ -112,6 +170,17 @@ class App:
         self.h_var = num("针高 mm", 5, 1, 20, 0.5)
 
         tk.Button(row, text="保存 PNG", command=self.save_png).pack(side="right", padx=4)
+
+        # 拓扑图（力导向）控制
+        tk.Label(row, text="│ 拓扑图", bg="#f7f9fc", fg="#94a3b8").pack(side="left", padx=(14, 2))
+        self.graph_var = tk.StringVar()
+        self.graph_box = ttk.Combobox(row, state="readonly", width=10,
+                                      values=["章鱼（球头+8触手）", "球体（纯拓扑）"],
+                                      textvariable=self.graph_var)
+        self.graph_box.current(0)
+        self.graph_box.pack(side="left", padx=4)
+        tk.Button(row, text="生成", command=self.generate_graph, relief="flat",
+                  bg="#e2e8f0", padx=10).pack(side="left", padx=2)
         self.status = tk.Label(row, text="", bg="#f7f9fc", fg="#2563eb",
                                font=("Microsoft YaHei UI", 9))
         self.status.pack(side="right", padx=10)
@@ -149,6 +218,17 @@ class App:
         self.text.configure(yscrollcommand=yscroll.set)
         yscroll.pack(side="right", fill="y")
         self.text.pack(fill="both", expand=True, padx=6, pady=6)
+
+        # 拓扑图（力导向布局）
+        self.tabgraph = tk.Frame(self.nb, bg="#f8fafc")
+        self.nb.add(self.tabgraph, text="  拓扑图（力导向）  ")
+        self.canvas_graph = tk.Canvas(self.tabgraph, highlightthickness=0, bg="#f8fafc")
+        self.canvas_graph.pack(fill="both", expand=True)
+        self.item_graph = None
+        for ev, fn in (("<ButtonPress-1>", self._press), ("<B1-Motion>", self._motion),
+                       ("<ButtonRelease-1>", self._release), ("<MouseWheel>", self._wheel)):
+            self.canvas_graph.bind(ev, fn)
+        self.canvas_graph.bind("<Configure>", lambda _e: self._later("view", fine=False, delay=200))
 
     def _build_footer(self):
         foot = tk.Frame(self.root, bg="#f7f9fc")
@@ -247,6 +327,7 @@ class App:
         self.redraw_3d(fine=True)
         self.redraw_chart()
         self.redraw_text()
+        self.redraw_graph(fine=True)
         if self.scene:
             s = self.scene
             self.info.config(
@@ -257,13 +338,17 @@ class App:
             self.notes.config(text="解析：" + "；".join(notes) if notes else "")
 
     def redraw_3d(self, fine=True):
-        if not self.scene or not self.scene.get("bands"):
+        """三维页签现在也走拓扑 + 力导向管线（与网页版同一条）"""
+        if not self.scene:
+            return
+        graph = self.scene.get("graph")
+        if not graph:
             return
         w = max(320, self.canvas3d.winfo_width())
         h = max(240, self.canvas3d.winfo_height())
-        img = render(self.scene, size=(w, h), yaw=self.yaw, pitch=self.pitch,
-                     current=self.round_var.get(), segments=96 if fine else 40,
-                     ss=2 if fine else 1, margin=self.zoom)
+        img = render_graph(graph, size=(w, h), yaw=self.yaw, pitch=self.pitch,
+                           current=self.round_var.get(), ss=2 if fine else 1,
+                           margin=self.zoom)
         self.photo3d = ImageTk.PhotoImage(img)
         if self.item3d is None:
             self.item3d = self.canvas3d.create_image(0, 0, anchor="nw", image=self.photo3d)
@@ -298,8 +383,18 @@ class App:
     def _later(self, what, fine=True, delay=80):
         if what in self._jobs:
             self.root.after_cancel(self._jobs[what])
-        fn = {"3d": lambda: self.redraw_3d(fine), "chart": self.redraw_chart,
-              "both": lambda: (self.redraw_3d(fine), self.redraw_chart())}[what]
+
+        def view():
+            self.redraw_3d(fine)
+            self.redraw_graph(fine)
+
+        fn = {
+            "3d": lambda: self.redraw_3d(fine),
+            "graph": lambda: self.redraw_graph(fine),
+            "chart": self.redraw_chart,
+            "view": view,                     # 旋转/缩放同时刷新三维与拓扑图
+            "both": lambda: (self.redraw_3d(fine), self.redraw_chart()),
+        }[what]
         self._jobs[what] = self.root.after(delay, fn)
 
     # ────────────────────────── 交互 ──────────────────────────
@@ -313,19 +408,20 @@ class App:
         x0, y0, yaw0, pitch0 = self._drag
         self.yaw = (yaw0 + (e.x - x0) * 0.6) % 360
         self.pitch = max(-85.0, min(85.0, pitch0 + (e.y - y0) * 0.5))
-        self._later("3d", fine=False, delay=40)
+        self._later("view", fine=False, delay=40)
 
     def _release(self, _e):
         self._drag = None
-        self._later("3d", fine=True, delay=10)
+        self._later("view", fine=True, delay=10)
 
     def _wheel(self, e):
         self.zoom = max(0.7, min(3.0, self.zoom * (0.92 if e.delta > 0 else 1.08)))
-        self._later("3d", fine=False, delay=30)
+        self._later("view", fine=False, delay=30)
 
     def _set_view(self, yaw, pitch):
         self.yaw, self.pitch = yaw, pitch
         self.redraw_3d(fine=True)
+        self.redraw_graph(fine=True)
 
     def save_png(self):
         if not self.scene:
@@ -333,8 +429,9 @@ class App:
         n = self.round_var.get()
         a = os.path.join(HERE, f"preview-3d-round{n}.png")
         b = os.path.join(HERE, f"preview-chart-round{n}.png")
-        render(self.scene, size=(900, 640), yaw=self.yaw, pitch=self.pitch,
-               current=n, segments=96, ss=2, margin=self.zoom).save(a)
+        if self.scene.get("graph"):
+            render_graph(self.scene["graph"], size=(900, 700), yaw=self.yaw,
+                         pitch=self.pitch, current=n, ss=2, margin=self.zoom).save(a)
         render_chart(self.scene, size=(900, 900), current=n, ss=2).save(b)
         self.status.config(text=f"已保存 {os.path.basename(a)} / {os.path.basename(b)}")
 

@@ -129,15 +129,16 @@
       <label>当前第 <span class="val" id="rv">1</span> 圈</label>
       <input type="range" id="round" min="1" max="1" step="1" value="1">
       <div class="legend">
-        <span><i class="dot" style="background:#cbd5e1"></i>还没钩</span>
-        <span><i class="dot" style="background:#7ea6d8"></i>已钩</span>
-        <span><i class="dot" style="background:#f0a63a"></i>当前圈</span>
+        <span><i class="dot" style="background:#b9c6d6"></i>还没钩</span>
+        <span><i class="dot" style="background:#5b8cc8"></i>已钩</span>
+        <span><i class="dot" style="background:#e89a3c"></i>当前圈</span>
+        <span><i class="dot" style="background:#d98a52"></i>分支（触手/腿）</span>
       </div>
       <label style="display:flex;align-items:center;gap:8px;margin-top:12px">
-        <input type="checkbox" id="grid" checked style="width:auto"> 显示针目网格（每针一格，可数针）
+        <input type="checkbox" id="nodes" checked style="width:auto"> 显示针目（每个小球 = 一针）
       </label>
       <label style="display:flex;align-items:center;gap:8px">
-        <input type="checkbox" id="ruler" checked style="width:auto"> 显示标尺（每格 10mm）
+        <input type="checkbox" id="links" checked style="width:auto"> 显示耦合连线
       </label>
       <div id="issues"></div>
     </div>
@@ -152,8 +153,10 @@
     <div class="card">
       <h2>三维可视化（拖动旋转 · 滚轮缩放）</h2>
       <canvas id="view"></canvas>
+      <div class="hint" id="status"></div>
       <div class="hint" id="stats"></div>
-      <div class="hint">曲面上的每一格就是图解里的一针：<b>横向格子数 = 该圈针数</b>，可以直接数针核对。</div>
+      <div class="hint"><b>每个小球 = 图解里的一针</b>，细线 = 针与针的耦合。
+        形状由力导向求解实时算出 —— 它会边收敛边更新，你能看到织物"长"出来的过程。</div>
     </div>
     <div class="card">
       <h2>侧视对照：目标轮廓 vs 实际针数曲线</h2>

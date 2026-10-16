@@ -1,14 +1,14 @@
 /**
- * 三维可视化：把图解渲染成可以看、可以数针的实体。
+ * 三维预览 —— 已重构为「拓扑图 + 力导向」管线。
  *
- * 三个层次，从粗到细：
- *   ① 曲面本体   —— 按每圈针数换算半径的回转体
- *   ② 针目网格   —— 每一针在曲面上占一个格子（横向=圈边界，纵向=针与针的分界）
- *   ③ 标尺       —— 每 10mm 一格，50mm 加长，用来读尺寸
+ * 和旧版的根本区别：
+ *   旧版：针数序列 → 回转体截锥（只画旋转对称的壳，看不到针）
+ *   新版：IR → 拓扑图 → 力导向求解 → **每个针目一个实例** + 耦合连线
  *
- * 关键点：②的每一根纵向网格线，角度来自 src/chart.js 的 layoutChart()，
- * 也就是"这一针真正穿在上一圈哪一针上"的拓扑定位。
- * 所以三维网格、符号图解、文字图解三者用的是同一份角度数据 —— 不可能对不上。
+ * 所以你现在能在三维里直接数针、看见触手这类非回转体结构。
+ *
+ * 性能做法（对齐成熟实现）：几何只建一次，之后每个 tick 只更新
+ * 实例矩阵与位置缓冲，绝不重建几何。物理跑在 Worker 里，主线程只收坐标。
  */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -17,9 +17,12 @@ import { createPattern, roundTops, roundOps } from '../src/ir.js';
 import { buildPartFromProfile, PRESETS, normalizeProfile } from '../src/build.js';
 import { validatePattern, report } from '../src/validate.js';
 import { toText } from '../src/pattern.js';
-import { bodyBands, stitchGridSegments, rulerSegments, fitView } from '../src/solid.js';
+import { fitView } from '../src/solid.js';
+import { createSimulation } from '../src/force.js';
 
 const $ = (id) => document.getElementById(id);
+
+const MAX_NODES = 6000;
 
 const state = {
   preset: 'ball',
@@ -27,13 +30,11 @@ const state = {
   current: 1,
   part: null,
   plan: null,
-  showGrid: true,
-  showRuler: true,
+  count: 0,
+  rounds: 0,
+  showLinks: true,
+  showNodes: true,
 };
-
-/* ────────────────────────────── three.js 场景 ────────────────────────────── */
-
-const canvas = $('view');
 
 function showBootError(text) {
   const el = $('boot-error');
@@ -43,28 +44,29 @@ function showBootError(text) {
   }
 }
 
+/* ────────────────────────────── three.js 场景 ────────────────────────────── */
+
+const canvas = $('view');
 let renderer;
 try {
   renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 } catch (err) {
   showBootError(
     '无法创建 WebGL 上下文，三维视图无法显示。\n'
-    + '可能原因：浏览器禁用了 WebGL / 显卡驱动过旧 / 远程桌面或虚拟机没有硬件加速。\n'
-    + '排查：地址栏打开 chrome://gpu 看 WebGL 是否 Enabled；或在浏览器设置里开启「使用硬件加速」。\n\n'
-    + '原始错误：' + err.message,
+    + '可能原因：浏览器禁用了 WebGL / 显卡驱动过旧 / 远程桌面无硬件加速。\n'
+    + '排查：地址栏打开 chrome://gpu 看 WebGL 是否 Enabled。\n\n原始错误：' + err.message,
   );
   throw err;
 }
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 
-// 诊断信息：三维若空白，这一行能立刻区分「WebGL 没起来」还是「几何算错了」
 let glInfo = '未知';
 try {
   const gl = renderer.getContext();
   const dbg = gl.getExtension('WEBGL_debug_renderer_info');
-  glInfo = `three r${THREE.REVISION} · ${dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : '（渲染器名被浏览器隐藏）'}`;
-} catch { /* 拿不到就算了，不影响渲染 */ }
+  glInfo = `three r${THREE.REVISION} · ${dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : '（渲染器名被隐藏）'}`;
+} catch { /* 忽略 */ }
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xeef2f7);
@@ -74,116 +76,134 @@ const controls = new OrbitControls(camera, canvas);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 
-scene.add(new THREE.HemisphereLight(0xffffff, 0x3a4658, 1.2));
-const keyLight = new THREE.DirectionalLight(0xffffff, 1.35);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x3a4658, 1.25));
+const keyLight = new THREE.DirectionalLight(0xffffff, 1.3);
 keyLight.position.set(70, 140, 100);
 scene.add(keyLight);
 const fillLight = new THREE.DirectionalLight(0xffffff, 0.45);
 fillLight.position.set(-90, 40, -80);
 scene.add(fillLight);
-const rimLight = new THREE.DirectionalLight(0xffffff, 0.3);
-rimLight.position.set(0, -60, -100);
-scene.add(rimLight);
 
-const group = new THREE.Group();
-scene.add(group);
+/* ─────────────────── 针目（实例化）与耦合连线（一次建好） ─────────────────── */
 
-const bodyMat = {
-  past: new THREE.MeshStandardMaterial({ color: 0x7ea6d8, roughness: 0.95, metalness: 0, side: THREE.DoubleSide }),
-  current: new THREE.MeshStandardMaterial({ color: 0xf0a63a, roughness: 0.8, metalness: 0, side: THREE.DoubleSide }),
-  future: new THREE.MeshStandardMaterial({
-    color: 0xc2d0e0, roughness: 0.97, metalness: 0, side: THREE.DoubleSide, transparent: true, opacity: 0.92,
-  }),
+const nodeGeo = new THREE.SphereGeometry(1, 10, 8);
+const nodeMat = new THREE.MeshStandardMaterial({ roughness: 0.85, metalness: 0.02 });
+const nodeMesh = new THREE.InstancedMesh(nodeGeo, nodeMat, MAX_NODES);
+nodeMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+nodeMesh.frustumCulled = false;
+nodeMesh.count = 0;
+scene.add(nodeMesh);
+
+const linkGeo = new THREE.BufferGeometry();
+linkGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(MAX_NODES * 8 * 3), 3));
+linkGeo.attributes.position.setUsage(THREE.DynamicDrawUsage);
+linkGeo.setDrawRange(0, 0);
+const linkMesh = new THREE.LineSegments(
+  linkGeo,
+  new THREE.LineBasicMaterial({ color: 0x7d8ea4, transparent: true, opacity: 0.42 }),
+);
+linkMesh.frustumCulled = false;
+scene.add(linkMesh);
+
+const COLOR = {
+  past: new THREE.Color(0x5b8cc8),
+  current: new THREE.Color(0xe89a3c),
+  future: new THREE.Color(0xb9c6d6),
+  chain: new THREE.Color(0xd98a52),
 };
-const gridMat = new THREE.LineBasicMaterial({ color: 0x6f8399, transparent: true, opacity: 0.6 });
-const rulerMat = new THREE.LineBasicMaterial({ color: 0x64748b, transparent: true, opacity: 0.85 });
 
-let bandMeshes = [];
-let gridObject = null;
-let rulerObject = null;
+const tmpMat = new THREE.Matrix4();
+const tmpQuat = new THREE.Quaternion();
+const tmpPos = new THREE.Vector3();
+const tmpScale = new THREE.Vector3();
 
-function resize() {
-  const w = canvas.clientWidth || 640;
-  const h = canvas.clientHeight || 460;
-  renderer.setSize(w, h, false);   // false：不改 CSS，避免 ResizeObserver 自激
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
-}
+let nodeMeta = [];          // [{round, chain}]
+let linkPairs = null;       // Int32Array，[a,b, a,b, ...]
+let lastPositions = null;
 
-/* ① 曲面本体：每圈一个截锥段，便于逐圈高亮 */
-function buildBody(counts, gauge) {
-  for (const m of bandMeshes) {
-    group.remove(m);
-    m.geometry.dispose();
-  }
-  bandMeshes = [];
-  for (const band of bodyBands(counts, gauge)) {
-    const geo = new THREE.LatheGeometry(
-      [
-        new THREE.Vector2(Math.max(band.r0, 0.05), band.y0),
-        new THREE.Vector2(Math.max(band.r1, 0.05), band.y1),
-      ],
-      96,
-    );
-    const mesh = new THREE.Mesh(geo, bodyMat.future);
-    mesh.userData.round = band.round;
-    group.add(mesh);
-    bandMeshes.push(mesh);
-  }
-  applyHighlight();
-}
-
-/* ② 针目网格：横向圈边界 + 纵向针与针的分界（几何由 src/solid.js 算，可测） */
-function buildStitchGrid(part, gauge, counts) {
-  if (gridObject) {
-    group.remove(gridObject);
-    gridObject.geometry.dispose();
-    gridObject = null;
-  }
-  if (!state.showGrid) return;
-
-  const { positions, ok } = stitchGridSegments(part, gauge);
-  if (!ok || !positions.length) return;
-
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  gridObject = new THREE.LineSegments(geo, gridMat);
-  group.add(gridObject);
-}
-
-/* ③ 标尺：每 10mm 一格，50mm 加长（几何由 src/solid.js 算） */
-function buildRuler(counts, gauge) {
-  if (rulerObject) {
-    group.remove(rulerObject);
-    rulerObject.geometry.dispose();
-    rulerObject = null;
-  }
-  if (!state.showRuler) return;
-
-  const { positions } = rulerSegments(counts, gauge);
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  rulerObject = new THREE.LineSegments(geo, rulerMat);
-  group.add(rulerObject);
-}
-
-function applyHighlight() {
-  for (const mesh of bandMeshes) {
-    const n = mesh.userData.round;
-    mesh.material = n === state.current ? bodyMat.current : n < state.current ? bodyMat.past : bodyMat.future;
+function ensureWorker() {
+  try {
+    return new Worker(new URL('./force.worker.js', import.meta.url), { type: 'module' });
+  } catch (err) {
+    console.warn('Worker 不可用，退回主线程求解：', err);
+    return null;
   }
 }
+const worker = ensureWorker();
 
-/** 按模型实际包围盒取景：保证整件（含标尺）完整落在画面里 */
-function fitCamera() {
-  const box = new THREE.Box3().setFromObject(group);
-  if (box.isEmpty()) return;
+/* ─────────────────────────────── 主流程 ─────────────────────────────── */
+
+let fallbackSim = null;
+let fallbackRaf = 0;
+
+function stopFallback() {
+  if (fallbackRaf) cancelAnimationFrame(fallbackRaf);
+  fallbackRaf = 0;
+  fallbackSim = null;
+}
+
+/** 把一份坐标应用到场景（几何不变，只改矩阵与缓冲） */
+function applyPositions(flat) {
+  lastPositions = flat;
+  const n = flat.length / 3;
+  const r = Math.max(0.6, state.gauge.w * 0.42);   // 视觉半径 ≈ 半个针宽
+
+  for (let i = 0; i < n; i++) {
+    tmpPos.set(flat[i * 3], flat[i * 3 + 1], flat[i * 3 + 2]);
+    tmpScale.set(r, r, r);
+    tmpMat.compose(tmpPos, tmpQuat, tmpScale);
+    nodeMesh.setMatrixAt(i, tmpMat);
+  }
+  nodeMesh.count = n;
+  nodeMesh.instanceMatrix.needsUpdate = true;
+  nodeMesh.visible = state.showNodes;
+
+  if (linkPairs) {
+    const arr = linkGeo.attributes.position.array;
+    const count = linkPairs.length / 2;
+    for (let k = 0; k < count; k++) {
+      const a = linkPairs[k * 2] * 3;
+      const b = linkPairs[k * 2 + 1] * 3;
+      const o = k * 6;
+      arr[o] = flat[a]; arr[o + 1] = flat[a + 1]; arr[o + 2] = flat[a + 2];
+      arr[o + 3] = flat[b]; arr[o + 4] = flat[b + 1]; arr[o + 5] = flat[b + 2];
+    }
+    linkGeo.attributes.position.needsUpdate = true;
+    linkGeo.setDrawRange(0, count * 2);
+    linkMesh.visible = state.showLinks;
+  }
+  paintNodes();
+}
+
+/** 按"已钩 / 当前 / 未钩"给实例上色 */
+function paintNodes() {
+  if (!nodeMesh.count) return;
+  const cur = state.current;
+  for (let i = 0; i < nodeMesh.count; i++) {
+    const meta = nodeMeta[i] || {};
+    let c;
+    if (meta.chain) c = COLOR.chain;
+    else if (meta.round === cur) c = COLOR.current;
+    else if (meta.round < cur) c = COLOR.past;
+    else c = COLOR.future;
+    nodeMesh.setColorAt(i, c);
+  }
+  if (nodeMesh.instanceColor) nodeMesh.instanceColor.needsUpdate = true;
+}
+
+function fitCameraToNodes(flat) {
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < flat.length; i += 3) {
+    minX = Math.min(minX, flat[i]); maxX = Math.max(maxX, flat[i]);
+    minY = Math.min(minY, flat[i + 1]); maxY = Math.max(maxY, flat[i + 1]);
+    minZ = Math.min(minZ, flat[i + 2]); maxZ = Math.max(maxZ, flat[i + 2]);
+  }
+  if (!Number.isFinite(minX)) return;
   const v = fitView(
-    {
-      min: { x: box.min.x, y: box.min.y, z: box.min.z },
-      max: { x: box.max.x, y: box.max.y, z: box.max.z },
-    },
+    { min: { x: minX, y: minY, z: minZ }, max: { x: maxX, y: maxY, z: maxZ } },
     { fov: camera.fov, aspect: camera.aspect },
+    { margin: 1.35 },
   );
   camera.position.set(v.position.x, v.position.y, v.position.z);
   camera.near = v.near;
@@ -193,10 +213,72 @@ function fitCamera() {
   controls.update();
 }
 
-function animate() {
-  requestAnimationFrame(animate);
-  controls.update();
-  renderer.render(scene, camera);
+function onWorkerMessage(ev) {
+  const msg = ev.data;
+  if (msg.type === 'ready') {
+    nodeMeta = msg.nodes;
+    linkPairs = Int32Array.from(msg.links);
+    linkGeo.setDrawRange(0, linkPairs.length / 2 * 2);
+    $('status').textContent = `求解中…（${msg.total} 个针目）`;
+    return;
+  }
+  if (msg.type === 'tick') {
+    applyPositions(msg.positions);
+    if (nodeMesh.count && !state.fitted) {
+      fitCameraToNodes(msg.positions);
+      state.fitted = true;
+    }
+    $('status').textContent = `求解中… α=${msg.alpha.toFixed(3)}`;
+    return;
+  }
+  if (msg.type === 'end') {
+    $('status').textContent = `收敛完成（${msg.ticks} 步）`;
+    if (lastPositions) fitCameraToNodes(lastPositions);
+  }
+}
+
+if (worker) worker.onmessage = onWorkerMessage;
+
+function startLayout(part) {
+  state.fitted = false;
+  stopFallback();
+  const payload = {
+    type: 'init',
+    part: { id: part.id, rounds: part.rounds },
+    gauge: state.gauge,
+    options: { guideStrength: 0.06, chargeStrength: -6, chargeCutoff: 7 },
+    stepsPerFrame: 3,
+  };
+
+  if (worker) {
+    worker.postMessage(payload);
+    return;
+  }
+  // 主线程兜底：结构一样，只是会和渲染抢时间
+  const graphPart = payload.part;
+  import('../src/graph.js').then(async ({ graphFromPart }) => {
+    const { createPart } = await import('../src/ir.js');
+    const graph = graphFromPart(createPart(graphPart), state.gauge);
+    fallbackSim = createSimulation(graph, { linkDistance: state.gauge.w, ...payload.options });
+    nodeMeta = fallbackSim.nodes.map((n) => ({ round: n.round, chain: n.chain }));
+    const at = new Map(fallbackSim.nodes.map((n, i) => [n.id, i]));
+    linkPairs = Int32Array.from(
+      fallbackSim.links.flatMap((l) => [at.get(l.source), at.get(l.target)]),
+    );
+    const pump = () => {
+      if (!fallbackSim) return;
+      for (let i = 0; i < 3 && fallbackSim.alpha > 0; i++) fallbackSim.tick();
+      const flat = new Float32Array(fallbackSim.nodes.length * 3);
+      fallbackSim.nodes.forEach((n, i) => {
+        flat[i * 3] = n.x; flat[i * 3 + 1] = n.y; flat[i * 3 + 2] = n.z;
+      });
+      applyPositions(flat);
+      if (!state.fitted) { fitCameraToNodes(flat); state.fitted = true; }
+      if (fallbackSim.alpha > 0) fallbackRaf = requestAnimationFrame(pump);
+      else { $('status').textContent = `收敛完成（${fallbackSim.ticks} 步）`; fitCameraToNodes(flat); }
+    };
+    pump();
+  });
 }
 
 /* ────────────────────────── 2D 侧视：目标 vs 实际 ────────────────────────── */
@@ -221,7 +303,6 @@ function draw2D() {
   const prof = state.plan.profile;
   const totalH = counts.length * state.gauge.h;
   const maxR = Math.max(1, ...prof.map((p) => p.r), ...actual.map((a) => a.r));
-
   const pad = 18;
   const sx = (W / 2 - pad) / maxR;
   const sy = (H - 2 * pad) / Math.max(totalH, 1);
@@ -257,14 +338,10 @@ function draw2D() {
     g.moveTo(W / 2, Y(cur.y));
     g.lineTo(X(cur.r), Y(cur.y));
     g.stroke();
-    g.fillStyle = '#f59e0b';
-    g.beginPath();
-    g.arc(X(cur.r), Y(cur.y), 3.5, 0, Math.PI * 2);
-    g.fill();
   }
 }
 
-/* ─────────────────────────────── 主流程 ─────────────────────────────── */
+/* ─────────────────────────────── 重建 ─────────────────────────────── */
 
 function parseProfile(text) {
   const pts = [];
@@ -288,6 +365,14 @@ function applyPreset(name) {
   $('profile').value = p.map((q) => `${q.h.toFixed(1)}, ${q.r.toFixed(1)}`).join('\n');
 }
 
+function resize() {
+  const w = canvas.clientWidth || 640;
+  const h = canvas.clientHeight || 460;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+
 function rebuild() {
   state.gauge = { w: +$('w').value, h: +$('h').value };
   $('wv').textContent = state.gauge.w.toFixed(1);
@@ -307,6 +392,7 @@ function rebuild() {
   state.plan = plan;
 
   const rounds = part.rounds.length;
+  state.rounds = rounds;
   if (state.current > rounds) state.current = rounds;
   if (state.current < 1) state.current = 1;
   const slider = $('round');
@@ -318,18 +404,9 @@ function rebuild() {
   pattern.parts.push(part);
   const res = validatePattern(pattern);
 
-  const counts = part.rounds.map(roundTops);
-  buildBody(counts, state.gauge);
-  buildStitchGrid(part, state.gauge, counts);
-  buildRuler(counts, state.gauge);
-  fitCamera();
-  draw2D();
-
   const out = [toText(pattern), '', '─'.repeat(36)];
-  if (!res.issues.length) out.push('✅ 校验通过：结构合法，可以照着钩。');
-  else out.push(report(res));
-  out.push('');
-  out.push(`整数化 + 约束偏差：最大 ${(plan.deviation.maxRel * 100).toFixed(1)}%（${plan.deviation.maxAbs.toFixed(2)} mm）`);
+  out.push(res.issues.length ? report(res) : '✅ 校验通过：结构合法，可以照着钩。');
+  out.push(`整数化偏差：最大 ${(plan.deviation.maxRel * 100).toFixed(1)}%（${plan.deviation.maxAbs.toFixed(2)} mm）`);
   if (plan.clamps.length) {
     out.push('被耦合约束修正的圈：');
     for (const c of plan.clamps) out.push(`  第 ${c.round} 圈 ${c.want} → ${c.got}（${c.reason}）`);
@@ -345,17 +422,21 @@ function rebuild() {
     issuesEl.innerHTML = '<div class="ok" style="margin-top:10px">✅ 结构合法，可以照着钩</div>';
   }
 
+  const counts = part.rounds.map(roundTops);
   const peak = Math.max(...counts);
-  const total = part.rounds.reduce((a, r) => a + roundOps(r), 0);
-  const H = rounds * state.gauge.h;
+  const totalOps = part.rounds.reduce((a, r) => a + roundOps(r), 0);
   $('stats').textContent =
-    `共 ${rounds} 圈 · 峰值 ${peak} 针 · 合计 ${total} 针 · ` +
-    `成品约 Ø${((peak * state.gauge.w) / Math.PI).toFixed(1)}mm × 高 ${H.toFixed(1)}mm` +
-    `　（标尺：每格 10mm，长格 50mm）` +
-    `\n渲染：${glInfo} · 分段 ${bandMeshes.length} 段 · 网格线 ${gridObject ? '已开' : '已关'}`;
+    `共 ${rounds} 圈 · 峰值 ${peak} 针 · 合计 ${totalOps} 针 · `
+    + `成品约 Ø${((peak * state.gauge.w) / Math.PI).toFixed(1)}mm × 高 ${(rounds * state.gauge.h).toFixed(1)}mm`
+    + `　（每个小球 = 一针，连线 = 耦合关系）
+渲染：${glInfo} · 求解在 ${worker ? 'Worker' : '主线程（兜底）'}`;
+
+  resize();
+  draw2D();
+  startLayout(part);
 }
 
-/* ─────────────────────────────── 事件绑定 ─────────────────────────────── */
+/* ─────────────────────────────── 事件 ─────────────────────────────── */
 
 $('preset').addEventListener('change', (e) => {
   state.preset = e.target.value;
@@ -365,10 +446,7 @@ $('preset').addEventListener('change', (e) => {
 });
 $('w').addEventListener('input', rebuild);
 $('h').addEventListener('input', rebuild);
-$('apply').addEventListener('click', () => {
-  state.current = 1;
-  rebuild();
-});
+$('apply').addEventListener('click', () => { state.current = 1; rebuild(); });
 $('reset').addEventListener('click', () => {
   applyPreset(state.preset);
   state.current = 1;
@@ -377,26 +455,27 @@ $('reset').addEventListener('click', () => {
 $('round').addEventListener('input', (e) => {
   state.current = +e.target.value;
   $('rv').textContent = String(state.current);
-  applyHighlight();
+  paintNodes();
   draw2D();
 });
-$('grid').addEventListener('change', (e) => {
-  state.showGrid = e.target.checked;
-  rebuild();
+$('nodes').addEventListener('change', (e) => {
+  state.showNodes = e.target.checked;
+  nodeMesh.visible = state.showNodes;
 });
-$('ruler').addEventListener('change', (e) => {
-  state.showRuler = e.target.checked;
-  rebuild();
+$('links').addEventListener('change', (e) => {
+  state.showLinks = e.target.checked;
+  linkMesh.visible = state.showLinks;
 });
 
 if (typeof ResizeObserver !== 'undefined') {
-  new ResizeObserver(() => {
-    resize();
-    draw2D();
-  }).observe(canvas);
+  new ResizeObserver(() => { resize(); draw2D(); }).observe(canvas);
 }
 
 applyPreset(state.preset);
 resize();
 rebuild();
-animate();
+(function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+})();

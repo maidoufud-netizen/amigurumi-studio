@@ -24,6 +24,8 @@ import { toText } from '../src/pattern.js';
 import { validatePattern, report } from '../src/validate.js';
 import { profileFromSpec, normalizeSpec, describeSpec } from '../src/shape.js';
 import { parsePrompt } from '../src/prompt.js';
+import { graphFromPart } from '../src/graph.js';
+import { createSimulation } from '../src/force.js';
 
 const [, , requestArg, outArg = 'tools/scene.json'] = process.argv;
 
@@ -79,6 +81,25 @@ const ruler = rulerSegments(counts, gauge);
 // ⑤ 符号图布局（角度就是三维网格用的同一份）
 const layout = layoutChart(part);
 
+// ⑥ 拓扑图 + 力导向布局（三维预览现在走这条管线）
+const graph = graphFromPart(part, gauge);
+const sim = createSimulation(graph, {
+  linkDistance: gauge.w,
+  chargeStrength: -6,
+  chargeCutoff: 7,
+  guideStrength: 0.06,
+});
+sim.run(500);
+const graphScene = {
+  name: describeSpec(spec),
+  gauge,
+  nodes: sim.nodes.map((n) => ({ x: n.x, y: n.y, z: n.z, chain: !!n.chain, round: n.round })),
+  links: sim.links.map((l) => [l.s, l.t, l.kind]),
+  summary: sim.summary(),
+  converged: sim.alpha === 0,
+  ticks: sim.ticks,
+};
+
 const scene = {
   spec,
   notes,
@@ -101,6 +122,7 @@ const scene = {
     }
     : null,
   pattern: toText(pattern),
+  graph: graphScene,
   validation: { ok: validation.ok, issues: validation.issues, text: report(validation) },
   totalHeight: counts.length * gauge.h,
   peak: Math.max(...counts),
