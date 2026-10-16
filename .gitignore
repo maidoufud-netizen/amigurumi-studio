@@ -16,5 +16,11 @@ __pycache__/
 # 生成的几何数据（由 tools/emit-scene.mjs 产出）
 tools/scene.json
 
+# 渲染产物与临时请求（示例图放在 docs/assets）
+tools/out-*.png
+tools/preview-*.png
+tools/request*.json
+*.tmp.json
+
 # profile 备份等临时文件
 *.bak-*
