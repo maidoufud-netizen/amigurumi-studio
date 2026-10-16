@@ -26,3 +26,5 @@ tools/request*.json
 *.bak-*
 
 tools/graph.json
+tools/octopus.png
+tools/*.json
