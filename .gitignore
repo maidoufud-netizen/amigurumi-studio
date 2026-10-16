@@ -13,5 +13,8 @@ Thumbs.db
 __pycache__/
 *.pyc
 
+# 生成的几何数据（由 tools/emit-scene.mjs 产出）
+tools/scene.json
+
 # profile 备份等临时文件
 *.bak-*

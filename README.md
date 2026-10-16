@@ -40,6 +40,25 @@
 - **标尺**：每格 10mm、长格 50mm，用来读成品尺寸。
 - 改剖面或拖 `w`/`h`（gauge），实体、网格、图解、侧视对照图**同时**重算。
 
+## 原生渲染窗口（完全绕开浏览器）
+
+浏览器会碰到 WebGL 被禁用、CDN 被墙、缓存过期这些问题。所以另有一条**不经过浏览器**的路径：
+
+```bash
+node tools/emit-scene.mjs ball 5 5 tools/scene.json   # ① 生成几何（复用 src/ 里已测过的代码）
+python tools/render.py tools/scene.json out.png        # ② 软件渲染成 PNG（纯 Python + Pillow）
+python tools/viewer.py                                 # ③ 原生窗口：拖动旋转 / 滚轮缩放 / 逐圈高亮
+```
+
+![三维实体](docs/assets/preview-solid.png)
+
+![逐圈高亮第 5 圈](docs/assets/preview-highlight.png)
+
+- 渲染是**软件光栅化**（画家算法 + 平面着色 + 2 倍超采样抗锯齿）：不用 OpenGL、不用 three.js、不联网。
+- **几何只有一份**：`src/solid.js`。网页版和原生窗口用的是同一份数据，不可能漂移。
+- 附带好处：渲染结果能直接存成 PNG，所以**效果可以在没有浏览器的情况下被检查** ——
+  这也是我能自己验证"三维到底画出来没有"的方式。
+
 ## 已实现
 
 | 模块 | 作用 |
@@ -53,6 +72,9 @@
 | [`web/index.html`](web/index.html) · [`web/app.js`](web/app.js) | **三维可视化窗口**：实体 + 针目网格 + 逐圈高亮 + 标尺 + 侧视对照 |
 | [`web/chart.html`](web/chart.html) · [`web/chart.js`](web/chart.js) | 图解可视化窗口：符号图解 + 统计 + 打印 |
 | [`scripts/serve.js`](scripts/serve.js) | 零依赖静态服务器，供两个预览页使用 |
+| [`tools/emit-scene.mjs`](tools/emit-scene.mjs) | 几何 → JSON（复用 `src/solid.js`，供原生渲染器使用） |
+| [`tools/render.py`](tools/render.py) | **软件渲染器**：JSON → PNG，无 OpenGL、无浏览器、不联网 |
+| [`tools/viewer.py`](tools/viewer.py) | **原生渲染窗口**：拖动旋转、滚轮缩放、逐圈高亮、导出 PNG |
 | [`docs/spec.md`](docs/spec.md) | 图解语法规范 v0.1：IR、文字语法、符号表、校验规则 |
 | [`docs/architecture.md`](docs/architecture.md) | 架构与数据流逻辑图（Mermaid，GitHub 直接渲染） |
 | [`test/run.js`](test/run.js) | 零依赖测试：62 项，含经典头部序列、图解布局与三维几何不变量 |
