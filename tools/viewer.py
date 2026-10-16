@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """
-原生渲染窗口：不经过浏览器，所以没有 WebGL / CDN / 缓存这些问题。
+原生三维渲染窗口（带提示词与图解）。
 
     python tools/viewer.py [--scene tools/scene.json] [--node <node路径>]
 
-操作：
-    拖动鼠标左键      旋转
-    滚轮              缩放
-    「第 N 圈」滑杆   逐圈高亮（蓝=已钩，琥珀=当前，灰=未钩）
-    预设 / 针宽 / 针高 改完点「重新生成几何」
-    「保存 PNG」      导出当前视角
+不经过浏览器：没有 WebGL、没有 CDN、没有缓存。软件渲染。
 
-几何由 tools/emit-scene.mjs（Node）生成，渲染由 tools/render.py（纯 Python）完成。
-本窗口只做交互与显示。
+界面分三个页签：
+    三维预览   拖动旋转 / 滚轮缩放 / 逐圈高亮
+    符号图解   环形符号图（与三维用同一份角度数据）
+    文字图解   6X / (X,V)×6 那套文字稿
+
+操作流程：
+    写一句提示词 → 点「解析提示词」（窗口会把解析结果回填到下面的尺寸框）
+    或直接改「形状 / 直径 / 高 / 针宽 / 针高」→ 点「确定生成」
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -24,159 +26,281 @@ import tkinter as tk
 from tkinter import ttk
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from render import render  # noqa: E402
+from render import render, render_chart  # noqa: E402
 
-import json  # noqa: E402
 from PIL import ImageTk  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
-PRESETS = [("球 · 头/身", "ball"), ("水滴 · 身体", "teardrop"),
-           ("锥 · 手/腿", "cone"), ("直筒", "cylinder")]
+SHAPES = [("球 · 头/身", "ball"), ("蛋形 · 身体", "egg"), ("水滴", "teardrop"),
+          ("锥 · 手/腿", "cone"), ("直筒", "cylinder")]
 VIEWS = [("等轴", 38, 16), ("正面", 0, 0), ("侧面", 90, 0), ("俯视", 0, 78)]
+EXAMPLES = ["直径6cm的圆球", "高8cm的水滴形，下面胖一点", "头围30cm的圆头",
+            "细长的手臂，长10cm，粗2cm", "直径8cm高12cm的直筒"]
 
 
-class Viewer:
+class App:
     def __init__(self, root: tk.Tk, scene_path: str, node_exe: str):
         self.root = root
         self.scene_path = scene_path
         self.node_exe = node_exe
-        self.scene = self._load(scene_path)
 
-        self.yaw, self.pitch = 38.0, 16.0
-        self.zoom = 1.14
-        self.current = max(1, len(self.scene["bands"]) // 2)
-        self.fine = True
+        self.yaw, self.pitch, self.zoom = 38.0, 16.0, 1.14
+        self.scene = None
+        self.photo3d = None
+        self.photo_chart = None
         self._drag = None
-        self._job = None
+        self._jobs = {}
 
         root.title("玩偶图解工作台 · 三维渲染窗口")
         root.configure(bg="#eef2f7")
 
-        # ── 顶部工具栏 ──
-        bar = tk.Frame(root, bg="#0f2557")
+        self._build_prompt_bar()
+        self._build_controls()
+        self._build_tabs()
+        self._build_footer()
+
+        self.load_scene()
+        self.redraw_all()
+
+    # ────────────────────────── 界面 ──────────────────────────
+
+    def _build_prompt_bar(self):
+        bar = tk.Frame(self.root, bg="#0f2557")
         bar.pack(fill="x")
-        tk.Label(bar, text="三维渲染窗口", bg="#0f2557", fg="#ffffff",
-                 font=("Microsoft YaHei UI", 11, "bold")).pack(side="left", padx=12, pady=8)
-        self.info = tk.Label(bar, text="", bg="#0f2557", fg="#93c5fd",
+        tk.Label(bar, text="提示词", bg="#0f2557", fg="#ffffff",
+                 font=("Microsoft YaHei UI", 10, "bold")).pack(side="left", padx=(12, 6), pady=10)
+
+        self.prompt_var = tk.StringVar()
+        entry = tk.Entry(bar, textvariable=self.prompt_var, width=42,
+                         font=("Microsoft YaHei UI", 10))
+        entry.pack(side="left", padx=4, ipady=3)
+        entry.bind("<Return>", lambda _e: self.generate(use_prompt=True))
+
+        tk.Button(bar, text="解析提示词", command=lambda: self.generate(use_prompt=True),
+                  bg="#2563eb", fg="white", relief="flat", padx=12).pack(side="left", padx=6)
+        tk.Button(bar, text="确定生成", command=lambda: self.generate(use_prompt=False),
+                  bg="#f59e0b", fg="#3b2606", relief="flat", padx=12,
+                  font=("Microsoft YaHei UI", 10, "bold")).pack(side="left", padx=2)
+
+        self.hint = tk.Label(bar, text="例：" + EXAMPLES[0], bg="#0f2557", fg="#93c5fd",
                              font=("Microsoft YaHei UI", 9))
-        self.info.pack(side="left", padx=6)
-        tk.Label(bar, text="左键拖动旋转 · 滚轮缩放", bg="#0f2557", fg="#93c5fd",
-                 font=("Microsoft YaHei UI", 9)).pack(side="right", padx=12)
+        self.hint.pack(side="right", padx=12)
 
-        # ── 画布 ──
-        self.W, self.H = 900, 620
-        self.canvas = tk.Canvas(root, width=self.W, height=self.H,
-                                highlightthickness=0, bg="#eef2f7")
-        self.canvas.pack(fill="both", expand=True)
-        self.photo = None
-        self.item = None
+    def _build_controls(self):
+        row = tk.Frame(self.root, bg="#f7f9fc")
+        row.pack(fill="x", padx=12, pady=(8, 4))
 
-        # ── 底部控制条 ──
-        panel = tk.Frame(root, bg="#f7f9fc")
-        panel.pack(fill="x", side="bottom")
+        tk.Label(row, text="形状", bg="#f7f9fc").pack(side="left")
+        self.shape_var = tk.StringVar()
+        self.shape_box = ttk.Combobox(row, state="readonly", width=11,
+                                      values=[label for label, _ in SHAPES], textvariable=self.shape_var)
+        self.shape_box.pack(side="left", padx=(4, 14))
 
-        row1 = tk.Frame(panel, bg="#f7f9fc")
-        row1.pack(fill="x", padx=12, pady=(8, 2))
-        self.round_var = tk.IntVar(value=self.current)
-        tk.Label(row1, text="第 N 圈", bg="#f7f9fc").pack(side="left")
-        self.round_scale = tk.Scale(
-            row1, from_=1, to=len(self.scene["bands"]), orient="horizontal",
-            variable=self.round_var, command=self._on_round, showvalue=True,
-            length=260, resolution=1, bg="#f7f9fc", highlightthickness=0,
-        )
-        self.round_scale.pack(side="left", padx=8)
+        def num(label, initial, lo, hi, step):
+            tk.Label(row, text=label, bg="#f7f9fc").pack(side="left")
+            var = tk.DoubleVar(value=initial)
+            tk.Spinbox(row, from_=lo, to=hi, increment=step, width=6,
+                       textvariable=var).pack(side="left", padx=(4, 12))
+            return var
 
-        tk.Label(row1, text="视角", bg="#f7f9fc").pack(side="left", padx=(16, 4))
-        for label, yaw, pitch in VIEWS:
-            tk.Button(row1, text=label, width=5,
-                      command=lambda y=yaw, p=pitch: self._set_view(y, p)).pack(side="left", padx=2)
+        # 长宽高：回转体下"长 = 宽 = 直径"，所以只需直径 + 高
+        self.dia_var = num("直径 mm", 50, 4, 400, 5)
+        self.hei_var = num("高 mm", 50, 4, 400, 5)
+        self.w_var = num("针宽 mm", 5, 1, 20, 0.5)
+        self.h_var = num("针高 mm", 5, 1, 20, 0.5)
 
-        tk.Button(row1, text="保存 PNG", command=self.save_png).pack(side="right", padx=4)
-
-        row2 = tk.Frame(panel, bg="#f7f9fc")
-        row2.pack(fill="x", padx=12, pady=(2, 10))
-        tk.Label(row2, text="形状", bg="#f7f9fc").pack(side="left")
-        self.preset_var = tk.StringVar(value=self.scene.get("preset", "ball"))
-        preset_box = ttk.Combobox(row2, state="readonly", width=12,
-                                  values=[label for label, _ in PRESETS])
-        preset_box.current([key for _, key in PRESETS].index(self.preset_var.get())
-                           if self.preset_var.get() in [k for _, k in PRESETS] else 0)
-        preset_box.pack(side="left", padx=6)
-        self.preset_box = preset_box
-
-        self.w_var = tk.DoubleVar(value=self.scene["gauge"]["w"])
-        self.h_var = tk.DoubleVar(value=self.scene["gauge"]["h"])
-        for label, var in (("针宽 w", self.w_var), ("针高 h", self.h_var)):
-            tk.Label(row2, text=label, bg="#f7f9fc").pack(side="left", padx=(12, 2))
-            tk.Spinbox(row2, from_=2, to=12, increment=0.5, width=5,
-                       textvariable=var).pack(side="left")
-
-        tk.Button(row2, text="重新生成几何", command=self.regen).pack(side="left", padx=12)
-        self.status = tk.Label(row2, text="", bg="#f7f9fc", fg="#64748b",
+        tk.Button(row, text="保存 PNG", command=self.save_png).pack(side="right", padx=4)
+        self.status = tk.Label(row, text="", bg="#f7f9fc", fg="#2563eb",
                                font=("Microsoft YaHei UI", 9))
-        self.status.pack(side="left", padx=6)
+        self.status.pack(side="right", padx=10)
 
-        # ── 事件 ──
-        self.canvas.bind("<ButtonPress-1>", self._press)
-        self.canvas.bind("<B1-Motion>", self._motion)
-        self.canvas.bind("<ButtonRelease-1>", self._release)
-        self.canvas.bind("<MouseWheel>", self._wheel)
-        self.canvas.bind("<Configure>", self._resize)
+    def _build_tabs(self):
+        self.nb = ttk.Notebook(self.root)
+        self.nb.pack(fill="both", expand=True, padx=12, pady=6)
 
-        self.redraw(fine=True)
+        # 三维
+        self.tab3d = tk.Frame(self.nb, bg="#eef2f7")
+        self.nb.add(self.tab3d, text="  三维预览  ")
+        self.canvas3d = tk.Canvas(self.tab3d, highlightthickness=0, bg="#eef2f7")
+        self.canvas3d.pack(fill="both", expand=True)
+        self.item3d = None
+        self.canvas3d.bind("<ButtonPress-1>", self._press)
+        self.canvas3d.bind("<B1-Motion>", self._motion)
+        self.canvas3d.bind("<ButtonRelease-1>", self._release)
+        self.canvas3d.bind("<MouseWheel>", self._wheel)
+        self.canvas3d.bind("<Configure>", lambda _e: self._later("3d", fine=False, delay=160))
+
+        # 图解
+        self.tabchart = tk.Frame(self.nb, bg="#ffffff")
+        self.nb.add(self.tabchart, text="  符号图解  ")
+        self.canvas_chart = tk.Canvas(self.tabchart, highlightthickness=0, bg="#ffffff")
+        self.canvas_chart.pack(fill="both", expand=True)
+        self.item_chart = None
+        self.canvas_chart.bind("<Configure>", lambda _e: self._later("chart", fine=True, delay=160))
+
+        # 文字
+        self.tabtext = tk.Frame(self.nb, bg="#ffffff")
+        self.nb.add(self.tabtext, text="  文字图解  ")
+        self.text = tk.Text(self.tabtext, wrap="none", font=("Consolas", 10),
+                            bg="#ffffff", fg="#0f172a", relief="flat")
+        yscroll = tk.Scrollbar(self.tabtext, command=self.text.yview)
+        self.text.configure(yscrollcommand=yscroll.set)
+        yscroll.pack(side="right", fill="y")
+        self.text.pack(fill="both", expand=True, padx=6, pady=6)
+
+    def _build_footer(self):
+        foot = tk.Frame(self.root, bg="#f7f9fc")
+        foot.pack(fill="x", side="bottom")
+
+        line1 = tk.Frame(foot, bg="#f7f9fc")
+        line1.pack(fill="x", padx=12, pady=(4, 2))
+        tk.Label(line1, text="第 N 圈", bg="#f7f9fc").pack(side="left")
+        self.round_var = tk.IntVar(value=1)
+        self.round_scale = tk.Scale(line1, from_=1, to=1, orient="horizontal",
+                                    variable=self.round_var, command=lambda _v: self._later("both", True, 30),
+                                    length=240, resolution=1, bg="#f7f9fc", highlightthickness=0)
+        self.round_scale.pack(side="left", padx=6)
+        tk.Label(line1, text="视角", bg="#f7f9fc").pack(side="left", padx=(12, 4))
+        for label, yaw, pitch in VIEWS:
+            tk.Button(line1, text=label, width=5, relief="flat", bg="#e2e8f0",
+                      command=lambda y=yaw, p=pitch: self._set_view(y, p)).pack(side="left", padx=2)
+        self.info = tk.Label(line1, text="", bg="#f7f9fc", fg="#334155",
+                             font=("Microsoft YaHei UI", 9))
+        self.info.pack(side="right", padx=8)
+
+        line2 = tk.Frame(foot, bg="#f7f9fc")
+        line2.pack(fill="x", padx=12, pady=(0, 8))
+        self.notes = tk.Label(line2, text="", bg="#f7f9fc", fg="#475569", justify="left",
+                              anchor="w", font=("Microsoft YaHei UI", 9))
+        self.notes.pack(side="left", fill="x", expand=True)
 
     # ────────────────────────── 数据 ──────────────────────────
 
-    def _load(self, path):
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-
-    def _emit(self, preset, w, h):
-        """调用 Node 重新生成几何（几何逻辑只有一份，在 src/ 里）。"""
-        script = os.path.join(HERE, "emit-scene.mjs")
-        subprocess.run(
-            [self.node_exe, script, preset, str(w), str(h), self.scene_path],
-            cwd=ROOT, check=True, capture_output=True,
-        )
-        self.scene = self._load(self.scene_path)
-        self.round_scale.configure(to=len(self.scene["bands"]))
-        self.current = min(self.current, len(self.scene["bands"]))
-        self.round_var.set(self.current)
-
-    # ────────────────────────── 渲染 ──────────────────────────
-
-    def redraw(self, fine=True):
-        self.fine = fine
-        w = max(320, self.canvas.winfo_width() or self.W)
-        h = max(240, self.canvas.winfo_height() or self.H)
-        # 拖动时降质量换流畅：少细分、不超采样
-        seg = 96 if fine else 40
-        ss = 2 if fine else 1
-        img = render(
-            self.scene, size=(w, h), yaw=self.yaw, pitch=self.pitch,
-            current=self.round_var.get(), segments=seg, ss=ss,
-            show_grid=True, show_ruler=True, margin=self.zoom,
-        )
-        self.photo = ImageTk.PhotoImage(img)
-        if self.item is None:
-            self.item = self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
+    def load_scene(self):
+        if os.path.exists(self.scene_path):
+            with open(self.scene_path, encoding="utf-8") as f:
+                self.scene = json.load(f)
+            self._apply_scene_to_ui()
         else:
-            self.canvas.itemconfig(self.item, image=self.photo)
-            self.canvas.coords(self.item, 0, 0)
+            self.scene = None
 
-        bands = len(self.scene["bands"])
-        peak = self.scene.get("peak", "?")
-        height = self.scene.get("totalHeight", "?")
-        self.info.config(text=f"{bands} 圈 · 峰值 {peak} 针 · 高 {height}mm")
-        self.status.config(text=("精细" if fine else "拖动中（低质量）"))
+    def _apply_scene_to_ui(self):
+        spec = self.scene.get("spec", {})
+        keys = [k for _, k in SHAPES]
+        if spec.get("kind") in keys:
+            self.shape_box.current(keys.index(spec["kind"]))
+        self.dia_var.set(spec.get("diameter", 50))
+        self.hei_var.set(spec.get("height", 50))
+        self.w_var.set(self.scene["gauge"]["w"])
+        self.h_var.set(self.scene["gauge"]["h"])
+        rounds = len(self.scene["bands"])
+        self.round_scale.configure(to=rounds)
+        if self.round_var.get() > rounds:
+            self.round_var.set(rounds)
 
-    def _later(self, fine=True, delay=90):
-        """合并高频事件，避免拖动时排队卡死。"""
-        if self._job is not None:
-            self.root.after_cancel(self._job)
-        self._job = self.root.after(delay, lambda: self.redraw(fine=fine))
+    def generate(self, use_prompt: bool):
+        """调用 Node 生成几何 + 图解。use_prompt=True 时以提示词为准。"""
+        kind = [k for _, k in SHAPES][self.shape_box.current()]
+        request = {
+            "gauge": {"w": self.w_var.get(), "h": self.h_var.get()},
+        }
+        if use_prompt:
+            text = self.prompt_var.get().strip()
+            if not text:
+                self.status.config(text="请先写一句提示词，或用「确定生成」按尺寸生成")
+                return
+            request["prompt"] = text
+        else:
+            request["spec"] = {
+                "kind": kind,
+                "diameter": self.dia_var.get(),
+                "height": self.hei_var.get(),
+            }
+
+        req_path = os.path.join(HERE, "request.tmp.json")
+        with open(req_path, "w", encoding="utf-8") as f:
+            json.dump(request, f, ensure_ascii=False)
+
+        script = os.path.join(HERE, "emit-scene.mjs")
+        try:
+            proc = subprocess.run(
+                [self.node_exe, script, "@" + req_path, self.scene_path],
+                cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=60,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.status.config(text=f"调用 Node 失败：{exc}")
+            return
+        if proc.returncode != 0:
+            self.status.config(text="生成失败，请看命令行输出")
+            self.notes.config(text=(proc.stderr or proc.stdout or "")[-400:])
+            return
+
+        self.load_scene()
+        self.status.config(text="已生成")
+        self.redraw_all()
+
+    # ────────────────────────── 绘制 ──────────────────────────
+
+    def redraw_all(self):
+        self.redraw_3d(fine=True)
+        self.redraw_chart()
+        self.redraw_text()
+        if self.scene:
+            s = self.scene
+            self.info.config(
+                text=f"{s['rounds']} 圈 · 峰值 {s['peak']} 针 · 合计 {s['totalOps']} 针 · "
+                     f"高 {s['totalHeight']:.0f}mm · 偏差 {s['maxDeviation'] * 100:.1f}%"
+            )
+            notes = s.get("notes") or []
+            self.notes.config(text="解析：" + "；".join(notes) if notes else "")
+
+    def redraw_3d(self, fine=True):
+        if not self.scene or not self.scene.get("bands"):
+            return
+        w = max(320, self.canvas3d.winfo_width())
+        h = max(240, self.canvas3d.winfo_height())
+        img = render(self.scene, size=(w, h), yaw=self.yaw, pitch=self.pitch,
+                     current=self.round_var.get(), segments=96 if fine else 40,
+                     ss=2 if fine else 1, margin=self.zoom)
+        self.photo3d = ImageTk.PhotoImage(img)
+        if self.item3d is None:
+            self.item3d = self.canvas3d.create_image(0, 0, anchor="nw", image=self.photo3d)
+        else:
+            self.canvas3d.itemconfig(self.item3d, image=self.photo3d)
+
+    def redraw_chart(self):
+        if not self.scene:
+            return
+        w = max(320, self.canvas_chart.winfo_width())
+        h = max(240, self.canvas_chart.winfo_height())
+        size = min(w, h)
+        img = render_chart(self.scene, size=(size, size), current=self.round_var.get(), ss=2)
+        self.photo_chart = ImageTk.PhotoImage(img)
+        cx = (w - size) // 2
+        cy = (h - size) // 2
+        if self.item_chart is None:
+            self.item_chart = self.canvas_chart.create_image(cx, cy, anchor="nw", image=self.photo_chart)
+        else:
+            self.canvas_chart.itemconfig(self.item_chart, image=self.photo_chart)
+            self.canvas_chart.coords(self.item_chart, cx, cy)
+
+    def redraw_text(self):
+        if not self.scene:
+            return
+        body = self.scene.get("pattern", "")
+        v = self.scene.get("validation", {})
+        tail = "\n\n" + "─" * 40 + "\n" + (v.get("text") or "")
+        self.text.delete("1.0", "end")
+        self.text.insert("1.0", body + tail)
+
+    def _later(self, what, fine=True, delay=80):
+        if what in self._jobs:
+            self.root.after_cancel(self._jobs[what])
+        fn = {"3d": lambda: self.redraw_3d(fine), "chart": self.redraw_chart,
+              "both": lambda: (self.redraw_3d(fine), self.redraw_chart())}[what]
+        self._jobs[what] = self.root.after(delay, fn)
 
     # ────────────────────────── 交互 ──────────────────────────
 
@@ -189,60 +313,42 @@ class Viewer:
         x0, y0, yaw0, pitch0 = self._drag
         self.yaw = (yaw0 + (e.x - x0) * 0.6) % 360
         self.pitch = max(-85.0, min(85.0, pitch0 + (e.y - y0) * 0.5))
-        self._later(fine=False, delay=40)
+        self._later("3d", fine=False, delay=40)
 
     def _release(self, _e):
         self._drag = None
-        self._later(fine=True, delay=10)
+        self._later("3d", fine=True, delay=10)
 
     def _wheel(self, e):
         self.zoom = max(0.7, min(3.0, self.zoom * (0.92 if e.delta > 0 else 1.08)))
-        self._later(fine=False, delay=30)
-
-    def _resize(self, _e):
-        self._later(fine=False, delay=150)
-
-    def _on_round(self, _v):
-        self._later(fine=True, delay=10)
+        self._later("3d", fine=False, delay=30)
 
     def _set_view(self, yaw, pitch):
         self.yaw, self.pitch = yaw, pitch
-        self.redraw(fine=True)
-
-    def regen(self):
-        preset = [k for label, k in PRESETS][self.preset_box.current()]
-        try:
-            self._emit(preset, self.w_var.get(), self.h_var.get())
-        except Exception as exc:  # noqa: BLE001
-            self.status.config(text=f"生成失败：{exc}")
-            return
-        self.status.config(text="几何已更新")
-        self.redraw(fine=True)
+        self.redraw_3d(fine=True)
 
     def save_png(self):
-        w = max(320, self.canvas.winfo_width() or self.W)
-        h = max(240, self.canvas.winfo_height() or self.H)
-        img = render(self.scene, size=(w, h), yaw=self.yaw, pitch=self.pitch,
-                     current=self.round_var.get(), segments=96, ss=2, margin=self.zoom)
-        out = os.path.join(HERE, f"preview-round{self.round_var.get()}.png")
-        img.save(out)
-        self.status.config(text=f"已保存 {os.path.relpath(out, ROOT)}")
+        if not self.scene:
+            return
+        n = self.round_var.get()
+        a = os.path.join(HERE, f"preview-3d-round{n}.png")
+        b = os.path.join(HERE, f"preview-chart-round{n}.png")
+        render(self.scene, size=(900, 640), yaw=self.yaw, pitch=self.pitch,
+               current=n, segments=96, ss=2, margin=self.zoom).save(a)
+        render_chart(self.scene, size=(900, 900), current=n, ss=2).save(b)
+        self.status.config(text=f"已保存 {os.path.basename(a)} / {os.path.basename(b)}")
 
 
 def main():
     ap = argparse.ArgumentParser(description="原生三维渲染窗口（无需浏览器）")
     ap.add_argument("--scene", default=os.path.join(HERE, "scene.json"))
     ap.add_argument("--node", default=os.environ.get("DSH_NODE", "node"),
-                    help="Node 可执行文件路径（用于重新生成几何）")
+                    help="Node 可执行文件路径（用于生成几何）")
     args = ap.parse_args()
 
-    if not os.path.exists(args.scene):
-        print(f"找不到几何文件 {args.scene}，请先运行：\n"
-              f"  node tools/emit-scene.mjs ball 5 5 tools/scene.json", file=sys.stderr)
-        return 1
-
     root = tk.Tk()
-    Viewer(root, args.scene, args.node)
+    root.geometry("1120x820")
+    App(root, args.scene, args.node)
     root.mainloop()
     return 0
 

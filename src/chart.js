@@ -1,4 +1,4 @@
-/**
+﻿/**
  * IR → 环形图解（符号图）SVG。
  *
  * 为什么是环形：玩偶是圈钩的，**一针画在哪里，由它穿在上一圈的哪一针上决定**。
@@ -38,8 +38,15 @@ function midAngle(a, b) {
   return a + d / 2;
 }
 
-function fail(rings, radii, msg) {
-  return { rings, maxR: radii[radii.length - 1] ?? DEFAULTS.r1, ok: false, error: msg };
+function fail(rings, radii, msg, cell, minGap) {
+  return {
+    rings,
+    maxR: radii[radii.length - 1] ?? DEFAULTS.r1,
+    ok: false,
+    error: msg,
+    cell,
+    minGap,
+  };
 }
 
 /**
@@ -101,8 +108,7 @@ export function layoutChart(part, options = {}) {
       const bases = OP[op].bases;
       const produces = OP[op].tops;
       if (cursor + bases > prev.length) {
-        return fail(rings, radii,
-          `第 ${i + 1} 圈吃掉的基针超过了上一圈的 ${prev.length} 针（图解不可钩），无法定位`);
+        return fail(rings, radii, `第 ${i + 1} 圈吃掉的基针超过了上一圈的 ${prev.length} 针（图解不可钩），无法定位`, cell, minGap);
       }
       const consumed = [];
       for (let k = 0; k < bases; k++) consumed.push(prev[cursor + k].angle);
@@ -123,13 +129,12 @@ export function layoutChart(part, options = {}) {
     }
 
     if (cursor !== prev.length) {
-      return fail(rings, radii,
-        `第 ${i + 1} 圈只吃掉了 ${cursor} / ${prev.length} 个基针（漏针），无法定位`);
+      return fail(rings, radii, `第 ${i + 1} 圈只吃掉了 ${cursor} / ${prev.length} 个基针（漏针），无法定位`, cell, minGap);
     }
     rings.push({ n: i + 1, r: radii[i], total: counts[i], stitches, glyphs });
   }
 
-  return { rings, maxR: radii[radii.length - 1], ok: true };
+  return { rings, maxR: radii[radii.length - 1], ok: true, cell, minGap };
 }
 
 /** 单个针法的线稿符号（无填充、无颜色） */

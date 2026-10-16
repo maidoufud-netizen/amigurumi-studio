@@ -192,6 +192,87 @@ def render(scene, size=(900, 640), yaw=38.0, pitch=16.0, current=1, segments=64,
     return img
 
 
+# ────────────────────────── 符号图解渲染 ──────────────────────────
+
+CHART_STROKE = (17, 24, 39)
+CHART_GUIDE = (215, 222, 232)
+CHART_LABEL = (100, 116, 139)
+CHART_CURRENT = (217, 119, 6)
+
+
+def _draw_symbol(draw, op, x, y, s, color, width):
+    """一个针法的线稿符号：sc = ×，inc = V，dec = ∧ 加一横。"""
+    h = s / 2
+    if op == "sc":
+        draw.line([(x - h, y - h), (x + h, y + h)], fill=color, width=width)
+        draw.line([(x + h, y - h), (x - h, y + h)], fill=color, width=width)
+    elif op == "inc":
+        draw.line([(x - h, y - h), (x, y + h)], fill=color, width=width)
+        draw.line([(x, y + h), (x + h, y - h)], fill=color, width=width)
+    else:  # dec
+        draw.line([(x - h, y + h), (x, y - h)], fill=color, width=width)
+        draw.line([(x, y - h), (x + h, y + h)], fill=color, width=width)
+        draw.line([(x - h * 0.62, y + h * 0.92), (x + h * 0.62, y + h * 0.92)],
+                  fill=color, width=width)
+
+
+def render_chart(scene, size=(560, 620), current=0, ss=2, background=(255, 255, 255)):
+    """把 scene['chart'] 画成符号图解。
+
+    chart 里的半径与角度来自 src/chart.js 的 layoutChart()——
+    与三维网格、文字图解同一份数据，所以三者不可能对不上。
+    """
+    fw, fh = size
+    W, H = fw * ss, fh * ss
+    img = Image.new("RGB", (W, H), background)
+    draw = ImageDraw.Draw(img)
+
+    chart = scene.get("chart")
+    if not chart:
+        draw.text((20 * ss, 20 * ss), "没有图解数据（该图解不可钩）", fill=(185, 28, 28))
+        return img.resize((fw, fh), Image.LANCZOS)
+
+    max_r = chart["maxR"]
+    pad = 44.0
+    scale = min(fw, fh) / (2 * max_r + 2 * pad)
+    cx, cy = fw / 2, fh / 2
+
+    def project(r, angle):
+        a = angle - math.pi / 2          # 角度 0 放在正上方（起针位）
+        return ((cx + r * math.cos(a) * scale) * ss, (cy + r * math.sin(a) * scale) * ss)
+
+    # 圈引导线：圆心是画布中心，不是 project(r,0)（那是圆的顶点，不是圆心！）
+    cx_px, cy_px = cx * ss, cy * ss
+    for ring in chart["rings"]:
+        rr = ring["r"] * scale * ss
+        draw.ellipse([cx_px - rr, cy_px - rr, cx_px + rr, cy_px + rr],
+                     outline=CHART_GUIDE, width=max(1, ss // 2 + 1))
+
+    # 符号：加针的两个针目在 layout 里已合成一个 V，所以这里一个 glyph 画一个符号。
+    # 符号大小必须**随画布一起放大**（只按 chart 单位算），否则大图上只有一堆小点；
+    # 同时留上限，避免相邻符号糊成一片。
+    cell = float(chart.get("cell", 7.2))
+    sym = max(3.5, min(13.0, 0.62 * cell * scale)) * ss
+    lw = max(1, int(round(0.16 * scale * ss)) + (ss - 1))
+    for ring in chart["rings"]:
+        color = CHART_CURRENT if (current and ring["n"] == current) else CHART_STROKE
+        for glyph in ring["glyphs"]:
+            x, y = project(ring["r"], glyph["angle"])
+            _draw_symbol(draw, glyph["op"], x, y, sym, color, lw)
+
+    # 圈号-针数：沿正上方排一列，加白底避免压住符号
+    # （分隔符用 "-"：默认位图字体没有 "·" 字形，会渲染成缺字）
+    for ring in chart["rings"]:
+        x, y = project(ring["r"], 0.0)
+        text = f"{ring['n']}-{ring['total']}"
+        tx, ty = x + 5 * ss, y - 6 * ss
+        box = draw.textbbox((tx, ty), text)
+        draw.rectangle([box[0] - 2 * ss, box[1] - ss, box[2] + 2 * ss, box[3] + ss], fill=background)
+        draw.text((tx, ty), text, fill=CHART_LABEL)
+
+    return img.resize((fw, fh), Image.LANCZOS) if ss != 1 else img
+
+
 def main():
     ap = argparse.ArgumentParser(description="把几何 JSON 渲染成 PNG（软件渲染，无需浏览器）")
     ap.add_argument("scene", help="emit-scene.mjs 产出的 JSON")
@@ -205,6 +286,8 @@ def main():
     ap.add_argument("--no-grid", action="store_true")
     ap.add_argument("--no-ruler", action="store_true")
     ap.add_argument("--bg", default="238,242,247")
+    ap.add_argument("--chart", action="store_true",
+                    help="改为渲染符号图解（而不是三维实体）")
     args = ap.parse_args()
 
     with open(args.scene, encoding="utf-8") as f:
@@ -212,6 +295,14 @@ def main():
 
     w, h = (int(x) for x in args.size.lower().split("x"))
     bg = tuple(int(x) for x in args.bg.split(","))
+
+    if args.chart:
+        img = render_chart(scene, size=(w, h), current=args.round, ss=args.ss,
+                           background=bg)
+        img.save(args.out)
+        rounds = len(scene.get("chart", {}).get("rings", []))
+        print(f"已渲染图解 {args.out}  {w}x{h}  {rounds} 圈  第 {args.round} 圈高亮")
+        return
 
     img = render(
         scene, size=(w, h), yaw=args.yaw, pitch=args.pitch, current=args.round,

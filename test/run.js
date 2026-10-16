@@ -10,6 +10,8 @@ import { formatOps, toText, expandOps } from '../src/pattern.js';
 import { validatePattern } from '../src/validate.js';
 import { layoutChart, chartToSVG, chartStats } from '../src/chart.js';
 import { boundaryRings, bodyBands, stitchGridSegments, rulerSegments } from '../src/solid.js';
+import { profileFromSpec, normalizeSpec, radiusRatio, estimate } from '../src/shape.js';
+import { parsePrompt } from '../src/prompt.js';
 
 let pass = 0;
 let fail = 0;
@@ -246,6 +248,83 @@ function createPatternWith(part) {
   const gb = stitchGridSegments(bad, gauge);
   eq(gb.ok, false, '不可钩的图解拒绝生成三维网格');
   ok(typeof gb.error === 'string' && gb.error.length > 0, '拒绝时给出原因');
+}
+
+// ---------- 10. 形状规格（shape.js） ----------
+{
+  const ball = profileFromSpec({ kind: 'ball', diameter: 50, height: 50 });
+  eq(ball.length, 9, '默认采样 9 个剖面点');
+  eq(ball[0].h, 0, '第一个点在底部');
+  eq(ball[ball.length - 1].h, 50, '最后一个点在顶部');
+  const maxR = Math.max(...ball.map((p) => p.r));
+  ok(Math.abs(maxR - 25) < 1e-6, `球体最大半径 == 直径/2 == 25（实际 ${maxR.toFixed(4)}）`);
+  ok(Math.abs(radiusRatio(0.5, { kind: 'ball' }) - 1) < 1e-9, '最粗处的半径比例 == 1');
+
+  ok(normalizeSpec({ kind: '不存在的形状' }).kind === 'ball', '未知形状退回球');
+  const clamped = normalizeSpec({ kind: 'ball', diameter: -5, height: 1e9, widestAt: 5, bulge: 99 });
+  ok(clamped.diameter >= 4, '直径被夹到下限');
+  ok(clamped.widestAt <= 0.98 && clamped.bulge <= 3, '比例与鼓起度被夹到区间内');
+
+  const cylR = profileFromSpec({ kind: 'cylinder', diameter: 40, height: 60 }).map((p) => p.r);
+  ok(Math.max(...cylR) - Math.min(...cylR) < 1e-6, '直筒半径处处相等');
+
+  const cone = profileFromSpec({ kind: 'cone', diameter: 40, height: 60 });
+  ok(cone[0].r > cone[cone.length - 1].r, '锥体底部比顶部粗');
+
+  const egg = profileFromSpec({ kind: 'egg', diameter: 40, height: 60 });
+  const eggPeak = egg.reduce((a, b) => (b.r > a.r ? b : a));
+  ok(Math.abs(eggPeak.h - 0.62 * 60) < 1e-9, `蛋形峰值采样在 62% 高度（${eggPeak.h}mm）`);
+  ok(Math.abs(eggPeak.r - 20) < 1e-9, '蛋形实际最大半径 == 设定直径的一半（最粗处被采到了）');
+
+  for (const kind of ['ball', 'egg', 'teardrop', 'cone', 'cylinder']) {
+    const pts = profileFromSpec({ kind, diameter: 40, height: 60 });
+    const peak = Math.max(...pts.map((p) => p.r));
+    ok(Math.abs(peak - 20) < 1e-6, `${kind}：最大半径严格等于 直径/2`);
+  }
+
+  const est = estimate({ kind: 'ball', diameter: 50, height: 50 }, { w: 5, h: 5 });
+  eq(est.rounds, 10, '估计圈数 == 高 / 针高');
+  eq(est.peak, Math.round((Math.PI * 50) / 5), '估计峰值针数 == 周长 / 针宽');
+}
+
+// ---------- 11. 提示词解析（prompt.js） ----------
+{
+  const a = parsePrompt('直径 6cm 的圆球');
+  eq(a.spec.kind, 'ball', '“圆球” → 球');
+  eq(a.spec.diameter, 60, '“直径 6cm” → 60mm');
+  eq(a.spec.height, 60, '只给直径时按形状惯例推出高度');
+
+  const b = parsePrompt('高 8cm 的水滴形');
+  eq(b.spec.kind, 'teardrop', '“水滴形” → 水滴');
+  eq(b.spec.height, 80, '“高 8cm” → 80mm');
+  ok(b.spec.diameter !== 80, '高度用的数字不会被再当成直径（这是修过的 bug）');
+  ok(b.spec.diameter > 0, '只给高度时直径被推出');
+
+  const c = parsePrompt('5厘米的小球');
+  eq(c.spec.kind, 'ball', '“小球” → 球');
+  eq(c.spec.diameter, 50, '没有关键词的尺寸按直径理解');
+
+  const d = parsePrompt('头围 30cm 的圆头');
+  eq(d.spec.diameter, Math.round(300 / Math.PI), '围度 ÷ π 换算成直径');
+
+  const e = parsePrompt('细长的手臂，长 10cm，粗 2cm');
+  eq(e.spec.height, 100, '写明高度后“细长”不再叠乘');
+  eq(e.spec.diameter, 20, '“粗 2cm” → 直径 20mm');
+
+  const f = parsePrompt('直径8cm高12cm的直筒');
+  eq(f.spec.kind, 'cylinder', '“直筒” → 直筒');
+  eq(f.spec.diameter, 80, '直径 80mm');
+  eq(f.spec.height, 120, '高 120mm');
+
+  const g = parsePrompt('圆球，胖一点');
+  ok(g.spec.diameter > 50, '“胖一点”让直径变大');
+
+  const h = parsePrompt('下面胖一点的水滴');
+  eq(h.spec.kind, 'teardrop', '“水滴”优先于“圆”类词');
+  ok(h.spec.widestAt < 0.5, '“下面胖”让最粗处下移');
+
+  ok(parsePrompt('').notes.length > 0, '空输入给出说明');
+  ok(parsePrompt('随便什么').notes.some((n) => n.includes('没认出')), '认不出时明确说明');
 }
 
 // ---------- 结果 ----------

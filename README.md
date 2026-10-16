@@ -45,10 +45,31 @@
 浏览器会碰到 WebGL 被禁用、CDN 被墙、缓存过期这些问题。所以另有一条**不经过浏览器**的路径：
 
 ```bash
-node tools/emit-scene.mjs ball 5 5 tools/scene.json   # ① 生成几何（复用 src/ 里已测过的代码）
-python tools/render.py tools/scene.json out.png        # ② 软件渲染成 PNG（纯 Python + Pillow）
-python tools/viewer.py                                 # ③ 原生窗口：拖动旋转 / 滚轮缩放 / 逐圈高亮
+python tools/viewer.py        # 直接开窗口（推荐）
 ```
+
+窗口里三个页签：**三维预览**（拖动旋转 / 滚轮缩放 / 逐圈高亮）、**符号图解**、**文字图解**。
+流程是：写一句提示词 → 点「解析提示词」→ 尺寸框回填 → 看三维和图解；
+也可以直接改「形状 / 直径 / 高 / 针宽 / 针高」再点「确定生成」。
+
+也可以命令行单独出图：
+
+```bash
+node tools/emit-scene.mjs '{"prompt":"直径6cm的球","gauge":{"w":5,"h":5}}' tools/scene.json
+python tools/render.py tools/scene.json solid.png            # 三维
+python tools/render.py tools/scene.json chart.png --chart     # 符号图解
+```
+
+**提示词 → 形状**用的是规则解析（[`src/prompt.js`](src/prompt.js)）：确定性、不联网、不需要密钥。
+
+| 你说 | 它理解成 |
+|---|---|
+| 直径6cm的圆球 | 球 · 直径 60mm（高按形状惯例推为 60mm） |
+| 高8cm的水滴形，下面胖一点 | 水滴 · 高 80mm · 最粗处下移到 34% 高度 |
+| 头围30cm的圆头 | 围度 ÷ π → 直径 95mm |
+| 细长的手臂，长10cm，粗2cm | Ø20mm × 高100mm（**写明尺寸后形容词不再叠乘**） |
+
+每条推断都会显示在窗口底部——**你必须能看到"系统把你的话理解成了什么"**，否则改错了也不知道为什么。
 
 ![三维实体](docs/assets/preview-solid.png)
 
@@ -68,6 +89,8 @@ python tools/viewer.py                                 # ③ 原生窗口：拖�
 | [`src/validate.js`](src/validate.js) | 合法性校验：耦合守恒、单圈变化上限、收口、分布均匀性（12 条规则） |
 | [`src/pattern.js`](src/pattern.js) | 针数序列 → 文字图解（`6X` / `(X,V)×6` 那套语法） |
 | [`src/chart.js`](src/chart.js) | IR → **环形符号图解** SVG：每一针按它真正穿的那一针定位 |
+| [`src/shape.js`](src/shape.js) | 形状规格（直径/高/最粗处/收口）→ 剖面曲线；**强制采到最粗处**，保证峰值针数兑现设定尺寸 |
+| [`src/prompt.js`](src/prompt.js) | 提示词 → 形状规格（规则解析，含单位换算、围度÷π、形容词微调与回显说明） |
 | [`src/solid.js`](src/solid.js) | IR → **三维几何数据**（纯数字数组，不依赖 three.js，可在 Node 里测） |
 | [`web/index.html`](web/index.html) · [`web/app.js`](web/app.js) | **三维可视化窗口**：实体 + 针目网格 + 逐圈高亮 + 标尺 + 侧视对照 |
 | [`web/chart.html`](web/chart.html) · [`web/chart.js`](web/chart.js) | 图解可视化窗口：符号图解 + 统计 + 打印 |
