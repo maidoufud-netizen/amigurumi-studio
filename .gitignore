@@ -24,3 +24,5 @@ tools/request*.json
 
 # profile 备份等临时文件
 *.bak-*
+
+tools/graph.json

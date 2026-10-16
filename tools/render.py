@@ -273,6 +273,70 @@ def render_chart(scene, size=(560, 620), current=0, ss=2, background=(255, 255, 
     return img.resize((fw, fh), Image.LANCZOS) if ss != 1 else img
 
 
+# ────────────────────────── 拓扑图渲染（球棍模型） ──────────────────────────
+
+LINK_COLOR = {                       # 按边的类型着色，一眼看出结构
+    "ring": (150, 176, 210),         # 圈内相邻
+    "couple": (108, 142, 190),       # 与上一圈耦合
+    "chain": (222, 140, 74),         # 分支（触手/腿）
+}
+
+
+def render_graph(scene, size=(900, 900), yaw=38.0, pitch=16.0, ss=2,
+                 background=(248, 250, 252), node_scale=0.22, margin=1.14):
+    """球棍模型：节点 = 针目，连线 = 耦合关系。"""
+    nodes = scene["nodes"]
+    links = scene["links"]
+    if not nodes:
+        return Image.new("RGB", size, background)
+
+    xs = [n["x"] for n in nodes]
+    ys = [n["y"] for n in nodes]
+    zs = [n["z"] for n in nodes]
+    lo = (min(xs), min(ys), min(zs))
+    hi = (max(xs), max(ys), max(zs))
+    center = tuple((lo[i] + hi[i]) / 2 for i in range(3))
+    radius = 0.5 * math.dist(lo, hi) or 1.0
+
+    cam = Camera(center, radius, aspect=size[0] / size[1], yaw=yaw, pitch=pitch, margin=margin)
+    W, H = size[0] * ss, size[1] * ss
+    img = Image.new("RGB", (W, H), background)
+    draw = ImageDraw.Draw(img)
+
+    proj = [cam.project((n["x"], n["y"], n["z"]), W, H) for n in nodes]
+    focal = (H / 2) / math.tan(math.radians(cam.fov) / 2)
+    stitch = float(scene.get("gauge", {}).get("w", 5))
+
+    prims = []
+    for a, b, kind in links:
+        pa, pb = proj[a], proj[b]
+        if pa and pb:
+            prims.append(((pa[2] + pb[2]) / 2, 0, (pa, pb, kind)))
+    for i, n in enumerate(nodes):
+        p = proj[i]
+        if p:
+            prims.append((p[2], 1, (p, n)))
+    prims.sort(key=lambda t: -t[0])          # 画家算法：远的先画
+
+    span = cam.dist + radius
+    for depth, kind, payload in prims:
+        fade = 1.0 - 0.45 * min(1.0, depth / span)
+        if kind == 0:
+            pa, pb, lkind = payload
+            base = LINK_COLOR.get(lkind, (160, 170, 185))
+            draw.line([pa[:2], pb[:2]],
+                      fill=tuple(int(c * fade) for c in base),
+                      width=max(1, int(ss * 0.9)))
+        else:
+            p, n = payload
+            r = max(1.2 * ss, node_scale * stitch * focal / max(p[2], 1e-3))
+            base = (226, 150, 88) if n.get("chain") else (86, 122, 176)
+            draw.ellipse([p[0] - r, p[1] - r, p[0] + r, p[1] + r],
+                         fill=tuple(int(c * fade) for c in base))
+
+    return img.resize(size, Image.LANCZOS) if ss != 1 else img
+
+
 def main():
     ap = argparse.ArgumentParser(description="把几何 JSON 渲染成 PNG（软件渲染，无需浏览器）")
     ap.add_argument("scene", help="emit-scene.mjs 产出的 JSON")
@@ -288,6 +352,8 @@ def main():
     ap.add_argument("--bg", default="238,242,247")
     ap.add_argument("--chart", action="store_true",
                     help="改为渲染符号图解（而不是三维实体）")
+    ap.add_argument("--graph", action="store_true",
+                    help="改为渲染拓扑图（球棍模型，来自 emit-graph.mjs）")
     args = ap.parse_args()
 
     with open(args.scene, encoding="utf-8") as f:
@@ -295,6 +361,14 @@ def main():
 
     w, h = (int(x) for x in args.size.lower().split("x"))
     bg = tuple(int(x) for x in args.bg.split(","))
+
+    if args.graph:
+        img = render_graph(scene, size=(w, h), yaw=args.yaw, pitch=args.pitch,
+                           ss=args.ss, background=bg)
+        img.save(args.out)
+        print(f"已渲染拓扑图 {args.out}  {w}x{h}  "
+              f"{len(scene['nodes'])} 节点 / {len(scene['links'])} 边")
+        return
 
     if args.chart:
         img = render_chart(scene, size=(w, h), current=args.round, ss=args.ss,

@@ -12,6 +12,8 @@ import { layoutChart, chartToSVG, chartStats } from '../src/chart.js';
 import { boundaryRings, bodyBands, stitchGridSegments, rulerSegments } from '../src/solid.js';
 import { profileFromSpec, normalizeSpec, radiusRatio, estimate } from '../src/shape.js';
 import { parsePrompt } from '../src/prompt.js';
+import { graphFromPart, octopusGraph, graphStats } from '../src/graph.js';
+import { createSimulation, sampleFrames } from '../src/force.js';
 
 let pass = 0;
 let fail = 0;
@@ -325,6 +327,92 @@ function createPatternWith(part) {
 
   ok(parsePrompt('').notes.length > 0, '空输入给出说明');
   ok(parsePrompt('随便什么').notes.some((n) => n.includes('没认出')), '认不出时明确说明');
+}
+
+// ---------- 12. 拓扑图与力导向（graph.js / force.js） ----------
+{
+  const gauge = { w: 5, h: 5 };
+  const counts = [6, 12, 18, 24, 30, 24, 18, 12, 6];
+  const rounds = [{ n: 1, ops: [{ op: 'sc', count: 6 }] }];
+  for (let i = 1; i < counts.length; i++) rounds.push(planRound(counts[i - 1], counts[i], i + 1));
+  const sphere = graphFromPart(createPart({ id: 'sphere', rounds }), gauge);
+
+  eq(sphere.nodes.length, counts.reduce((a, b) => a + b, 0), '节点数 == 所有针数之和');
+  eq(new Set(sphere.nodes.map((n) => n.id)).size, sphere.nodes.length, '节点 id 唯一');
+  ok(sphere.links.length > sphere.nodes.length, '边数多于节点数（圈内边 + 耦合边）');
+  ok(sphere.nodes.every((n) => n.seed && Number.isFinite(n.seed.x)), '每个节点都有初始种子坐标');
+  const kinds = new Set(sphere.links.map((l) => l.kind));
+  ok(kinds.has('ring') && kinds.has('couple'), '同时存在圈内边与耦合边');
+
+  throws(
+    () => graphFromPart(createPart({
+      id: 'bad',
+      rounds: [
+        { n: 1, ops: [{ op: 'sc', count: 6 }] },
+        { n: 2, ops: [{ op: 'sc', count: 4 }, { op: 'inc', count: 1 }] },
+      ],
+    }), gauge),
+    '漏针的图解拒绝建图',
+  );
+
+  // 收敛与确定性
+  const a = createSimulation(sphere, { linkDistance: gauge.w });
+  const steps = a.run(400);
+  eq(a.alpha, 0, `力求解在 400 步内收敛（实际 ${steps} 步）`);
+  const b = createSimulation(sphere, { linkDistance: gauge.w });
+  b.run(400);
+  let worst = 0;
+  for (let i = 0; i < a.nodes.length; i++) {
+    worst = Math.max(
+      worst,
+      Math.abs(a.nodes[i].x - b.nodes[i].x),
+      Math.abs(a.nodes[i].y - b.nodes[i].y),
+      Math.abs(a.nodes[i].z - b.nodes[i].z),
+    );
+  }
+  eq(worst, 0, '两次独立模拟完全一致（确定性可复现）');
+
+  // 关键交叉验证：纯拓扑喂进去，物理算出来的圈半径应接近解析式 c·w/2π
+  const c0 = a.summary().center;
+  const byRound = new Map();
+  for (const n of a.nodes) {
+    if (!byRound.has(n.round)) byRound.set(n.round, []);
+    byRound.get(n.round).push(n);
+  }
+  let maxRatio = 0;
+  for (const [, list] of byRound) {
+    const ringR = list.reduce((s, n) => s + Math.hypot(n.x - c0.x, n.z - c0.z), 0) / list.length;
+    const predicted = (list.length * gauge.w) / (2 * Math.PI);
+    maxRatio = Math.max(maxRatio, Math.abs(ringR - predicted) / predicted);
+  }
+  ok(maxRatio < 0.4, `纯拓扑力布局与解析式的最大相对偏差 ${(maxRatio * 100).toFixed(0)}% < 40%`);
+
+  // 钉住 + 重新加热（拖动交互）
+  const sim = createSimulation(sphere, { linkDistance: gauge.w });
+  sim.run(200);
+  const target = sim.nodes[0];
+  const wantX = target.x + 15;
+  sim.pin(target.id, { x: wantX, y: target.y, z: target.z });
+  sim.reheat(1);
+  eq(sim.alpha, 1, '重新加热把 alpha 重置为 1');
+  sim.run(200);
+  ok(Math.abs(target.x - wantX) < 1e-6, '被钉住的节点精确停在拖动位置');
+  ok(sim.pin(target.id, null), '释放钉住返回成功');
+
+  // 章鱼：解析式（回转体）根本表达不了的拓扑
+  const oct = octopusGraph(gauge);
+  const st = graphStats(oct);
+  ok(st.chains > 0, '章鱼图包含分支节点（触手）');
+  ok(st.nodes > sphere.nodes.length, '章鱼规模大于球体');
+  const osim = createSimulation(oct, { linkDistance: gauge.w, gravityStrength: 0.05 });
+  osim.run(300);
+  const bodyLow = Math.min(...osim.nodes.filter((n) => !n.chain).map((n) => n.y));
+  const chainLow = Math.min(...osim.nodes.filter((n) => n.chain).map((n) => n.y));
+  ok(chainLow < bodyLow - 3, `触手垂到身体下方 ${(bodyLow - chainLow).toFixed(1)}mm`);
+
+  const { frames } = sampleFrames(sphere, { steps: 40, every: 10, linkDistance: gauge.w });
+  eq(frames.length, 4, 'sampleFrames 按间隔产出 4 帧');
+  eq(frames[0].length, sphere.nodes.length, '每帧包含全部节点');
 }
 
 // ---------- 结果 ----------
