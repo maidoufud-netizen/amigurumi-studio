@@ -92,16 +92,41 @@
 <main>
   <section>
     <div class="card">
-      <h2>① 形状参数</h2>
-      <label>预设</label>
-      <select id="preset">
+      <h2>① 提示词</h2>
+      <input type="text" id="promptInput" placeholder="例如：直径6cm高7cm的水滴形，下面胖一点"
+             style="width:100%;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font:14px/1.5 inherit">
+      <div style="margin-top:8px;display:flex;gap:8px">
+        <button id="genPrompt">生成预览</button>
+        <button id="sampleBtn" class="ghost">填个例子</button>
+      </div>
+      <div class="hint" id="promptNotes" style="margin-top:8px">支持的写法：直径/头围/高/长 + 形状词 + 「胖一点」「下面胖」这类修饰。</div>
+    </div>
+
+    <div class="card">
+      <h2>② 形状</h2>
+      <label>形状类型</label>
+      <select id="kind">
         <option value="ball">球 · 头/身</option>
-        <option value="teardrop">水滴 · 身体</option>
+        <option value="egg">蛋形 · 身体</option>
+        <option value="teardrop">水滴</option>
         <option value="cone">锥 · 手/腿</option>
         <option value="cylinder">直筒</option>
       </select>
 
       <div class="row">
+        <div>
+          <label>直径 mm</label>
+          <input type="number" id="dia" min="4" max="400" step="1" value="50"
+                 style="width:100%;border:1px solid var(--line);border-radius:8px;padding:7px 9px;font:13px inherit">
+        </div>
+        <div>
+          <label>高 mm</label>
+          <input type="number" id="hei" min="4" max="400" step="1" value="50"
+                 style="width:100%;border:1px solid var(--line);border-radius:8px;padding:7px 9px;font:13px inherit">
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:8px">
         <div>
           <label>针宽 w <span class="val" id="wv">5.0</span> mm</label>
           <input type="range" id="w" min="2" max="12" step="0.5" value="5">
@@ -111,21 +136,21 @@
           <input type="range" id="h" min="2" max="12" step="0.5" value="5">
         </div>
       </div>
-      <div class="hint">换线材/钩针后先量实物：钩两圈、量宽度和高度，把真实值填进来，预览立刻校正。</div>
+      <div class="hint">针宽/针高 = 你的线材 + 钩针 + 手劲。换线材后钩两圈量实物，把真实值填进来，预览立刻校正。</div>
     </div>
 
     <div class="card">
-      <h2>② 剖面曲线（高度 mm, 半径 mm）</h2>
+      <h2>③ 剖面曲线（高级）</h2>
       <textarea id="profile" spellcheck="false"></textarea>
       <div style="margin-top:10px;display:flex;gap:8px">
-        <button id="apply">重新生成</button>
-        <button id="reset" class="ghost">回到预设</button>
+        <button id="apply">应用剖面</button>
+        <button id="reset" class="ghost">用形状重算</button>
       </div>
-      <div class="hint">每行一个点，例如 <code>0, 8.75</code>。这就是你要钩出来的侧面轮廓。</div>
+      <div class="hint">上面形状生成的轮廓就写在这里，也可以手改：每行一个点 <code>高度mm, 半径mm</code>，改完点「应用剖面」。</div>
     </div>
 
     <div class="card">
-      <h2>③ 逐圈对照</h2>
+      <h2>④ 逐圈对照</h2>
       <label>当前第 <span class="val" id="rv">1</span> 圈</label>
       <input type="range" id="round" min="1" max="1" step="1" value="1">
       <div class="legend">
@@ -144,7 +169,7 @@
     </div>
 
     <div class="card">
-      <h2>④ 生成的图解</h2>
+      <h2>⑤ 生成的图解</h2>
       <pre id="pattern">—</pre>
     </div>
   </section>
@@ -160,7 +185,7 @@
     </div>
     <div class="card">
       <h2>侧视对照：目标轮廓 vs 实际针数曲线</h2>
-      <canvas id="profile"></canvas>
+      <canvas id="profileView"></canvas>
       <div class="legend">
         <span><i class="dot" style="background:#94a3b8"></i>目标轮廓（你给的剖面）</span>
         <span><i class="dot" style="background:#2563eb"></i>实际（整数化+约束后的针数换算）</span>

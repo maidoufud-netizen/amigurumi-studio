@@ -14,7 +14,9 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 import { createPattern, roundTops, roundOps } from '../src/ir.js';
-import { buildPartFromProfile, PRESETS, normalizeProfile } from '../src/build.js';
+import { buildPartFromProfile, normalizeProfile } from '../src/build.js';
+import { profileFromSpec, normalizeSpec, describeSpec } from '../src/shape.js';
+import { parsePrompt } from '../src/prompt.js';
 import { validatePattern, report } from '../src/validate.js';
 import { toText } from '../src/pattern.js';
 import { fitView } from '../src/solid.js';
@@ -25,7 +27,9 @@ const $ = (id) => document.getElementById(id);
 const MAX_NODES = 6000;
 
 const state = {
-  preset: 'ball',
+  // 形状规格是"人话参数"，提示词与形状控件都写到这里，再由 shape.js 变成剖面
+  spec: { kind: 'ball', diameter: 50, height: 50 },
+  profileOverride: false,   // 手改过剖面曲线后置 true，此时剖面优先于规格
   gauge: { w: 5, h: 5 },
   current: 1,
   part: null,
@@ -284,7 +288,9 @@ function startLayout(part) {
 /* ────────────────────────── 2D 侧视：目标 vs 实际 ────────────────────────── */
 
 function draw2D() {
-  const c = $('profile');
+  // 注意：这里必须用 profileView（侧视图画布），不是 profile（剖面输入框）。
+  // 早先两者同名，getElementById 拿到的是 textarea，于是 getContext 报错。
+  const c = $('profileView');
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const W = c.clientWidth || 640;
   const H = c.clientHeight || 170;
@@ -355,14 +361,55 @@ function parseProfile(text) {
   return normalizeProfile(pts);
 }
 
-function applyPreset(name) {
-  const p = {
-    ball: PRESETS.ball(25),
-    teardrop: PRESETS.teardrop(25),
-    cone: PRESETS.cone(25),
-    cylinder: PRESETS.cylinder(20, 50),
-  }[name] || PRESETS.ball(25);
-  $('profile').value = p.map((q) => `${q.h.toFixed(1)}, ${q.r.toFixed(1)}`).join('\n');
+/** 把形状规格落地：更新输入控件，并把生成的剖面写进文本框 */
+function applySpec(spec, { silent = false } = {}) {
+  state.spec = normalizeSpec(spec);
+  state.profileOverride = false;
+  const pts = profileFromSpec(state.spec);
+  $('profile').value = pts.map((q) => `${q.h.toFixed(1)}, ${q.r.toFixed(1)}`).join('\n');
+  $('kind').value = state.spec.kind;
+  $('dia').value = String(Math.round(state.spec.diameter));
+  $('hei').value = String(Math.round(state.spec.height));
+  if (!silent) setNotes(describeSpec(state.spec));
+}
+
+/** 当前该用哪份剖面：手改过就用文本框，否则由规格生成 */
+function currentProfilePoints() {
+  if (state.profileOverride) return parseProfile($('profile').value);
+  return profileFromSpec(state.spec);
+}
+
+function setNotes(text) {
+  $('promptNotes').textContent = text;
+}
+
+const EXAMPLES = [
+  '直径6cm高7cm的水滴形，下面胖一点',
+  '头围30cm的圆头',
+  '细长的手臂，长10cm，粗2cm',
+  '直径8cm高12cm的直筒',
+  '高8cm的蛋形，胖一点',
+  '直径5厘米的小球',
+];
+let exampleIndex = 0;
+
+function fillExample() {
+  $('promptInput').value = EXAMPLES[exampleIndex % EXAMPLES.length];
+  exampleIndex++;
+  $('promptInput').focus();
+}
+
+/** 提示词 → 形状规格 → 预览。解析结果会回显，你才知道它把你的话理解成了什么 */
+function generateFromPrompt() {
+  const text = $('promptInput').value.trim();
+  if (!text) {
+    setNotes('请先写一句提示词，或直接改下面的形状与尺寸。');
+    return;
+  }
+  const { spec, notes } = parsePrompt(text, state.spec);
+  applySpec(spec, { silent: true });
+  setNotes(`解析：${notes.join('　·　')}`);
+  rebuild();
 }
 
 function resize() {
@@ -381,7 +428,7 @@ function rebuild() {
   let part;
   let plan;
   try {
-    const r = buildPartFromProfile(parseProfile($('profile').value), state.gauge, { id: 'head' });
+    const r = buildPartFromProfile(currentProfilePoints(), state.gauge, { id: 'head' });
     part = r.part;
     plan = r.plan;
   } catch (e) {
@@ -432,23 +479,49 @@ function rebuild() {
 渲染：${glInfo} · 求解在 ${worker ? 'Worker' : '主线程（兜底）'}`;
 
   resize();
-  draw2D();
+  // 先启动三维求解，再画 2D 侧视：2D 只是辅助视图，
+  // 万一它出错也不该把三维拖下水（之前就是顺序反了，导致三维一直不出）
   startLayout(part);
+  try {
+    draw2D();
+  } catch (err) {
+    console.warn('侧视图绘制失败（不影响三维）:', err);
+  }
 }
 
 /* ─────────────────────────────── 事件 ─────────────────────────────── */
 
-$('preset').addEventListener('change', (e) => {
-  state.preset = e.target.value;
-  applyPreset(state.preset);
+$('genPrompt').addEventListener('click', generateFromPrompt);
+$('promptInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') generateFromPrompt();
+});
+$('sampleBtn').addEventListener('click', fillExample);
+
+// 形状控件改动 → 重算剖面（并把手改标记清掉）
+$('kind').addEventListener('change', () => {
+  applySpec({ ...state.spec, kind: $('kind').value });
+  state.current = 1;
+  rebuild();
+});
+$('dia').addEventListener('change', () => {
+  applySpec({ ...state.spec, diameter: +$('dia').value });
+  state.current = 1;
+  rebuild();
+});
+$('hei').addEventListener('change', () => {
+  applySpec({ ...state.spec, height: +$('hei').value });
   state.current = 1;
   rebuild();
 });
 $('w').addEventListener('input', rebuild);
 $('h').addEventListener('input', rebuild);
-$('apply').addEventListener('click', () => { state.current = 1; rebuild(); });
+$('apply').addEventListener('click', () => {
+  state.profileOverride = true;     // 手改剖面优先
+  state.current = 1;
+  rebuild();
+});
 $('reset').addEventListener('click', () => {
-  applyPreset(state.preset);
+  applySpec(state.spec);
   state.current = 1;
   rebuild();
 });
@@ -471,7 +544,8 @@ if (typeof ResizeObserver !== 'undefined') {
   new ResizeObserver(() => { resize(); draw2D(); }).observe(canvas);
 }
 
-applyPreset(state.preset);
+applySpec(state.spec, { silent: true });
+setNotes('写一句提示词点「生成预览」，也可以直接改下面的形状与尺寸。');
 resize();
 rebuild();
 (function animate() {
