@@ -95,11 +95,12 @@
       <h2>① 提示词</h2>
       <input type="text" id="promptInput" placeholder="例如：直径6cm高7cm的水滴形，下面胖一点"
              style="width:100%;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font:14px/1.5 inherit">
-      <div style="margin-top:8px;display:flex;gap:8px">
+      <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
         <button id="genPrompt">生成预览</button>
+        <button id="ruleBtn" class="ghost">规则解析</button>
         <button id="sampleBtn" class="ghost">填个例子</button>
       </div>
-      <div class="hint" id="promptNotes" style="margin-top:8px">支持的写法：直径/头围/高/长 + 形状词 + 「胖一点」「下面胖」这类修饰。</div>
+      <div class="hint" id="promptNotes" style="margin-top:8px">「生成预览」会把提示词交给 DSH 会话里的 AI 生成形状规格（本地规则只能认 5 个形状词，「手臂」「底盘」这类名词会猜错）。想让两条路对比，就分别点两个按钮。</div>
     </div>
 
     <div class="card">

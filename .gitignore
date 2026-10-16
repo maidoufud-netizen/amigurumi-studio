@@ -29,3 +29,9 @@ tools/graph.json
 tools/octopus.png
 tools/*.json
 tools/new3d.png
+tools/ai-queue.json
+tools/req-*.json
+tools/test-request.json
+tools/ai-spec.json
+tools/scene-*.json
+tools/arm-*.png

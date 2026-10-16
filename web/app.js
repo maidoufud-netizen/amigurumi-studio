@@ -399,17 +399,83 @@ function fillExample() {
   $('promptInput').focus();
 }
 
-/** 提示词 → 形状规格 → 预览。解析结果会回显，你才知道它把你的话理解成了什么 */
-function generateFromPrompt() {
+/** 本地规则解析：不依赖 AI，随时可用，也是 AI 通道不通时的兜底 */
+function ruleParse(text) {
+  const { spec, notes } = parsePrompt(text, state.spec);
+  applySpec(spec, { silent: true });
+  setNotes(`规则解析：${notes.join('　·　')}`);
+  state.current = 1;
+  rebuild();
+}
+
+/** 轮询等待 AI 的答复 */
+async function pollAnswer(id, { timeoutMs = 180000, intervalMs = 700 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let waited = 0;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    waited += intervalMs;
+    try {
+      const res = await fetch(`/api/prompt?id=${encodeURIComponent(id)}`);
+      if (res.ok) {
+        const entry = await res.json();
+        if (entry.status === 'answered' && entry.spec) return entry;
+      }
+    } catch { /* 网络抖动，继续等 */ }
+    if (waited % 6000 < intervalMs) {
+      setNotes(`已把提示词交给 DSH 会话里的 AI（已等 ${Math.round(waited / 1000)}s）。`
+        + '一直不回就去对话里发一句催一下；或点「规则解析」立刻用本地规则生成。');
+    }
+  }
+  return null;
+}
+
+/**
+ * 提示词 → 形状规格。
+ *
+ * 走 AI 通道：提示词进本地队列（tools/ai-queue.json），
+ * 由 DSH 会话里的 AI 生成规格，页面轮询取回。
+ * 通道不可用或超时就退回本地规则解析 —— 规则法只认 5 个形状词，
+ * 遇到「手臂」「底盘」这类名词会瞎猜，所以优先用 AI。
+ */
+async function generateFromPrompt() {
   const text = $('promptInput').value.trim();
   if (!text) {
     setNotes('请先写一句提示词，或直接改下面的形状与尺寸。');
     return;
   }
-  const { spec, notes } = parsePrompt(text, state.spec);
-  applySpec(spec, { silent: true });
-  setNotes(`解析：${notes.join('　·　')}`);
-  rebuild();
+
+  const btn = $('genPrompt');
+  btn.disabled = true;
+  btn.textContent = '等待 AI…';
+  setNotes('已把提示词交给 DSH 会话里的 AI，等待生成规格…');
+
+  try {
+    const res = await fetch('/api/prompt', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: text, base: state.spec }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const { id } = await res.json();
+
+    const answer = await pollAnswer(id);
+    if (answer) {
+      applySpec(answer.spec, { silent: true });
+      setNotes(`${answer.answeredBy || 'AI'}：${(answer.notes || []).join('　·　') || '（无说明）'}`);
+      state.current = 1;
+      rebuild();
+    } else {
+      setNotes('AI 等待超时，已改用本地规则解析（名词类提示词可能不准）。');
+      ruleParse(text);
+    }
+  } catch (err) {
+    setNotes(`AI 通道不可用（${err.message}），已改用本地规则解析。`);
+    ruleParse(text);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '生成预览';
+  }
 }
 
 function resize() {
@@ -496,6 +562,11 @@ $('promptInput').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') generateFromPrompt();
 });
 $('sampleBtn').addEventListener('click', fillExample);
+$('ruleBtn').addEventListener('click', () => {
+  const text = $('promptInput').value.trim();
+  if (text) ruleParse(text);
+  else setNotes('先写一句提示词。');
+});
 
 // 形状控件改动 → 重算剖面（并把手改标记清掉）
 $('kind').addEventListener('change', () => {
