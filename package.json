@@ -1,0 +1,12 @@
+{
+  "name": "amigurumi-studio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "玩偶图解工作台：剖面 → 针数序列 → 图解 + 3D 预览，全部可校验",
+  "scripts": {
+    "test": "node test/run.js",
+    "serve": "node scripts/serve.js"
+  },
+  "license": "MIT"
+}

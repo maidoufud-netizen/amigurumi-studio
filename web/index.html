@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>玩偶图解工作台 · 预览</title>
+<style>
+  :root{
+    --ink:#0f172a; --ink2:#334155; --muted:#64748b; --line:#e2e8f0;
+    --bg:#f7f9fc; --card:#fff; --brand:#2563eb; --accent:#f59e0b;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    font:15px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif;
+    color:var(--ink);background:var(--bg);
+  }
+  header{
+    padding:14px 20px;background:#0f2557;color:#fff;display:flex;
+    align-items:baseline;gap:14px;flex-wrap:wrap;
+  }
+  header h1{font-size:17px;font-weight:700}
+  header span{font-size:13px;color:#93c5fd}
+  main{display:grid;grid-template-columns:minmax(320px,400px) 1fr;gap:16px;padding:16px;align-items:start}
+  @media (max-width:900px){main{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px}
+  .card + .card{margin-top:14px}
+  .card h2{font-size:14px;font-weight:700;color:var(--brand);letter-spacing:.4px;margin-bottom:10px;text-transform:uppercase}
+  label{display:block;font-size:13px;color:var(--ink2);margin:10px 0 4px;font-weight:600}
+  select,textarea,input[type=text]{
+    width:100%;border:1px solid var(--line);border-radius:8px;padding:8px 10px;
+    font:13px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--ink);background:#fff;
+  }
+  textarea{min-height:132px;resize:vertical}
+  input[type=range]{width:100%;accent-color:var(--brand)}
+  .row{display:flex;gap:10px}
+  .row > *{flex:1}
+  .val{font-variant-numeric:tabular-nums;color:var(--brand);font-weight:700}
+  #view{width:100%;height:460px;border-radius:12px;overflow:hidden;background:linear-gradient(180deg,#eef4fb,#e2ecf7);display:block}
+  #profile{width:100%;height:170px;display:block;background:#fff;border-radius:10px}
+  pre{
+    background:#0f172a;color:#e2e8f0;border-radius:10px;padding:12px;
+    font:12px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace;
+    overflow:auto;max-height:340px;white-space:pre;
+  }
+  .ok{color:#10b981;font-weight:700}
+  .bad{color:#ef4444;font-weight:700}
+  .warnbox{font:12px/1.6 ui-monospace,monospace;white-space:pre-wrap;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px;color:#92400e;margin-top:10px}
+  .legend{display:flex;gap:14px;font-size:12px;color:var(--muted);margin-top:8px;flex-wrap:wrap}
+  .dot{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+  .hint{font-size:12px;color:var(--muted);margin-top:6px}
+  button{
+    background:var(--brand);color:#fff;border:0;border-radius:8px;padding:9px 14px;
+    font-size:14px;font-weight:600;cursor:pointer
+  }
+  button.ghost{background:#fff;color:var(--ink2);border:1px solid var(--line)}
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<header>
+  <h1>玩偶图解工作台</h1>
+  <span>剖面 → 针数序列 → 图解 + 3D 预览（同源，不可能不一致）</span>
+</header>
+
+<main>
+  <section>
+    <div class="card">
+      <h2>① 形状参数</h2>
+      <label>预设</label>
+      <select id="preset">
+        <option value="ball">球 · 头/身</option>
+        <option value="teardrop">水滴 · 身体</option>
+        <option value="cone">锥 · 手/腿</option>
+        <option value="cylinder">直筒</option>
+      </select>
+
+      <div class="row">
+        <div>
+          <label>针宽 w <span class="val" id="wv">5.0</span> mm</label>
+          <input type="range" id="w" min="2" max="12" step="0.5" value="5">
+        </div>
+        <div>
+          <label>针高 h <span class="val" id="hv">5.0</span> mm</label>
+          <input type="range" id="h" min="2" max="12" step="0.5" value="5">
+        </div>
+      </div>
+      <div class="hint">换线材/钩针后先量实物：钩两圈、量宽度和高度，把真实值填进来，预览立刻校正。</div>
+    </div>
+
+    <div class="card">
+      <h2>② 剖面曲线（高度 mm, 半径 mm）</h2>
+      <textarea id="profile" spellcheck="false"></textarea>
+      <div style="margin-top:10px;display:flex;gap:8px">
+        <button id="apply">重新生成</button>
+        <button id="reset" class="ghost">回到预设</button>
+      </div>
+      <div class="hint">每行一个点，例如 <code>0, 8.75</code>。这就是你要钩出来的侧面轮廓。</div>
+    </div>
+
+    <div class="card">
+      <h2>③ 逐圈对照</h2>
+      <label>当前第 <span class="val" id="rv">1</span> 圈</label>
+      <input type="range" id="round" min="1" max="1" step="1" value="1">
+      <div class="legend">
+        <span><i class="dot" style="background:#cbd5e1"></i>还没钩</span>
+        <span><i class="dot" style="background:#60a5fa"></i>已钩</span>
+        <span><i class="dot" style="background:#f59e0b"></i>当前圈</span>
+      </div>
+      <div id="issues"></div>
+    </div>
+
+    <div class="card">
+      <h2>④ 生成的图解</h2>
+      <pre id="pattern">—</pre>
+    </div>
+  </section>
+
+  <section>
+    <div class="card">
+      <h2>3D 预览（拖动旋转）</h2>
+      <canvas id="view"></canvas>
+      <div class="hint" id="stats"></div>
+    </div>
+    <div class="card">
+      <h2>侧视对照：目标轮廓 vs 实际针数曲线</h2>
+      <canvas id="profile"></canvas>
+      <div class="legend">
+        <span><i class="dot" style="background:#94a3b8"></i>目标轮廓（你给的剖面）</span>
+        <span><i class="dot" style="background:#2563eb"></i>实际（整数化+约束后的针数换算）</span>
+        <span><i class="dot" style="background:#f59e0b"></i>当前圈</span>
+      </div>
+      <div class="hint">两条线差多少，就是"公式做不到的部分"——整数针数 + 可钩性约束带来的必然偏差。</div>
+    </div>
+  </section>
+</main>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>
