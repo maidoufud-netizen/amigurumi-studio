@@ -17,7 +17,7 @@ import { createPattern, roundTops, roundOps } from '../src/ir.js';
 import { buildPartFromProfile, PRESETS, normalizeProfile } from '../src/build.js';
 import { validatePattern, report } from '../src/validate.js';
 import { toText } from '../src/pattern.js';
-import { bodyBands, stitchGridSegments, rulerSegments } from '../src/solid.js';
+import { bodyBands, stitchGridSegments, rulerSegments, fitView } from '../src/solid.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -34,9 +34,37 @@ const state = {
 /* ────────────────────────────── three.js 场景 ────────────────────────────── */
 
 const canvas = $('view');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+
+function showBootError(text) {
+  const el = $('boot-error');
+  if (el) {
+    el.style.display = 'block';
+    el.textContent = String(text);
+  }
+}
+
+let renderer;
+try {
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+} catch (err) {
+  showBootError(
+    '无法创建 WebGL 上下文，三维视图无法显示。\n'
+    + '可能原因：浏览器禁用了 WebGL / 显卡驱动过旧 / 远程桌面或虚拟机没有硬件加速。\n'
+    + '排查：地址栏打开 chrome://gpu 看 WebGL 是否 Enabled；或在浏览器设置里开启「使用硬件加速」。\n\n'
+    + '原始错误：' + err.message,
+  );
+  throw err;
+}
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+// 诊断信息：三维若空白，这一行能立刻区分「WebGL 没起来」还是「几何算错了」
+let glInfo = '未知';
+try {
+  const gl = renderer.getContext();
+  const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+  glInfo = `three r${THREE.REVISION} · ${dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : '（渲染器名被浏览器隐藏）'}`;
+} catch { /* 拿不到就算了，不影响渲染 */ }
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xeef2f7);
@@ -64,10 +92,10 @@ const bodyMat = {
   past: new THREE.MeshStandardMaterial({ color: 0x7ea6d8, roughness: 0.95, metalness: 0, side: THREE.DoubleSide }),
   current: new THREE.MeshStandardMaterial({ color: 0xf0a63a, roughness: 0.8, metalness: 0, side: THREE.DoubleSide }),
   future: new THREE.MeshStandardMaterial({
-    color: 0xd3dbe6, roughness: 0.98, metalness: 0, side: THREE.DoubleSide, transparent: true, opacity: 0.62,
+    color: 0xc2d0e0, roughness: 0.97, metalness: 0, side: THREE.DoubleSide, transparent: true, opacity: 0.92,
   }),
 };
-const gridMat = new THREE.LineBasicMaterial({ color: 0x8fa3ba, transparent: true, opacity: 0.5 });
+const gridMat = new THREE.LineBasicMaterial({ color: 0x6f8399, transparent: true, opacity: 0.6 });
 const rulerMat = new THREE.LineBasicMaterial({ color: 0x64748b, transparent: true, opacity: 0.85 });
 
 let bandMeshes = [];
@@ -146,15 +174,22 @@ function applyHighlight() {
   }
 }
 
-function fitCamera(counts, gauge) {
-  const H = counts.length * gauge.h;
-  const maxR = (Math.max(...counts) * gauge.w) / (2 * Math.PI);
-  const d = Math.max(H * 1.15, maxR * 3.4) * 1.42 + 40;
-  camera.position.set(d * 0.52, H * 0.68, d * 0.78);
-  camera.near = Math.max(0.5, d / 500);
-  camera.far = d * 20;
+/** 按模型实际包围盒取景：保证整件（含标尺）完整落在画面里 */
+function fitCamera() {
+  const box = new THREE.Box3().setFromObject(group);
+  if (box.isEmpty()) return;
+  const v = fitView(
+    {
+      min: { x: box.min.x, y: box.min.y, z: box.min.z },
+      max: { x: box.max.x, y: box.max.y, z: box.max.z },
+    },
+    { fov: camera.fov, aspect: camera.aspect },
+  );
+  camera.position.set(v.position.x, v.position.y, v.position.z);
+  camera.near = v.near;
+  camera.far = v.far;
   camera.updateProjectionMatrix();
-  controls.target.set(0, H / 2, 0);
+  controls.target.set(v.target.x, v.target.y, v.target.z);
   controls.update();
 }
 
@@ -287,7 +322,7 @@ function rebuild() {
   buildBody(counts, state.gauge);
   buildStitchGrid(part, state.gauge, counts);
   buildRuler(counts, state.gauge);
-  fitCamera(counts, state.gauge);
+  fitCamera();
   draw2D();
 
   const out = [toText(pattern), '', '─'.repeat(36)];
@@ -316,7 +351,8 @@ function rebuild() {
   $('stats').textContent =
     `共 ${rounds} 圈 · 峰值 ${peak} 针 · 合计 ${total} 针 · ` +
     `成品约 Ø${((peak * state.gauge.w) / Math.PI).toFixed(1)}mm × 高 ${H.toFixed(1)}mm` +
-    `　（标尺：每格 10mm，长格 50mm）`;
+    `　（标尺：每格 10mm，长格 50mm）` +
+    `\n渲染：${glInfo} · 分段 ${bandMeshes.length} 段 · 网格线 ${gridObject ? '已开' : '已关'}`;
 }
 
 /* ─────────────────────────────── 事件绑定 ─────────────────────────────── */

@@ -103,8 +103,7 @@ export function stitchGridSegments(part, gauge, options = {}) {
 }
 
 /** 标尺：竖轴 + 每 step 一个刻度（每 rulerLongEvery 格加长） */
-export function rulerSegments(counts, gauge, options = {}) {
-  const { rulerStep, rulerLongEvery } = { ...SOLID_DEFAULTS, ...options };
+export function rulerSegments(counts, gauge, options = {}) {  const { rulerStep, rulerLongEvery } = { ...SOLID_DEFAULTS, ...options };
   const H = counts.length * gauge.h;
   const maxR = counts.length ? (Math.max(...counts) * gauge.w) / (2 * Math.PI) : 0;
   const x = maxR * 1.75 + 12;
@@ -118,4 +117,45 @@ export function rulerSegments(counts, gauge, options = {}) {
     ticks++;
   }
   return { positions: pos, ticks, x, height: H };
+}
+
+/**
+ * 相机取景：给定包围盒与相机参数，算出"能完整装下模型"的相机位置。
+ *
+ * 纯数学，不依赖 three.js —— 所以"模型会不会跑出画面"这件事可以在 Node 里断言。
+ * 用包围盒的外接球（比真实包围球保守），取水平/垂直视场中较小的那个来算距离，
+ * 保证长宽比怎么变都不会裁掉。
+ *
+ * @param {{min:{x,y,z}, max:{x,y,z}}} box
+ * @param {{fov:number, aspect:number}} camera  fov 单位为度
+ * @param {{margin?:number, dir?:{x,y,z}}} opts
+ */
+export function fitView(box, camera, opts = {}) {
+  const { margin = 1.12, dir = { x: 0.55, y: 0.42, z: 0.82 } } = opts;
+  const cx = (box.min.x + box.max.x) / 2;
+  const cy = (box.min.y + box.max.y) / 2;
+  const cz = (box.min.z + box.max.z) / 2;
+  const radius = 0.5 * Math.hypot(
+    box.max.x - box.min.x,
+    box.max.y - box.min.y,
+    box.max.z - box.min.z,
+  );
+  const vFov = (camera.fov * Math.PI) / 180;
+  const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
+  const half = Math.min(vFov, hFov) / 2;
+  const distance = (radius / Math.sin(half)) * margin;
+  const len = Math.hypot(dir.x, dir.y, dir.z) || 1;
+
+  return {
+    target: { x: cx, y: cy, z: cz },
+    position: {
+      x: cx + (dir.x / len) * distance,
+      y: cy + (dir.y / len) * distance,
+      z: cz + (dir.z / len) * distance,
+    },
+    near: Math.max(0.05, distance - radius * 2),
+    far: distance + radius * 4,
+    radius,
+    distance,
+  };
 }

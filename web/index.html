@@ -57,16 +57,35 @@
 <script type="importmap">
 {
   "imports": {
-    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    "three": "./vendor/three.module.js",
+    "three/addons/": "./vendor/addons/"
   }
 }
 </script>
 </head>
 <body>
+
+<div id="boot-error" style="display:none;margin:14px;padding:14px 16px;border:1px solid #fca5a5;background:#fef2f2;color:#991b1b;border-radius:10px;font:13px/1.65 ui-monospace,Consolas,monospace;white-space:pre-wrap"></div>
+<script>
+  // 任何脚本错误都显示出来，而不是让页面默默空白
+  function showBootError(text) {
+    var el = document.getElementById('boot-error');
+    if (!el) return;
+    el.style.display = 'block';
+    el.textContent = String(text);
+  }
+  window.addEventListener('error', function (e) {
+    showBootError('页面出错：' + (e.message || e.error) + '\n' + (e.filename || '') + (e.lineno ? ':' + e.lineno : ''));
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    var r = e.reason;
+    showBootError('模块加载/执行出错：' + (r && (r.stack || r.message) ? (r.stack || r.message) : r));
+  });
+</script>
+
 <header>
   <h1>玩偶图解工作台</h1>
-  <span>剖面 → 针数序列 → 图解 + 3D 预览（同源，不可能不一致）</span>
+  <span>剖面 → 针数序列 → 三维实体（同源，不可能不一致）</span>
   <a href="./chart.html" style="color:#bfdbfe;font-size:13px;text-decoration:none;border-bottom:1px dashed rgba(191,219,254,.5)">看符号图解 →</a>
 </header>
 
