@@ -327,6 +327,22 @@ function createPatternWith(part) {
 
   ok(parsePrompt('').notes.length > 0, '空输入给出说明');
   ok(parsePrompt('随便什么').notes.some((n) => n.includes('没认出')), '认不出时明确说明');
+
+  // 回归：base 参数是"当前状态"，不是"用户说过的话"。
+  // 之前把 base 里已有的值当成"已写明"，导致提示词里的尺寸被跳过、修饰词被屏蔽。
+  const withBase = parsePrompt('直径6cm的水滴', { kind: 'ball', diameter: 90, height: 90 });
+  eq(withBase.spec.diameter, 60, '提示词里的直径必须覆盖 base 的值');
+  eq(withBase.spec.kind, 'teardrop', '提示词里的形状必须覆盖 base');
+
+  const modOnBase = parsePrompt('胖一点', { kind: 'ball', diameter: 50, height: 50 });
+  ok(modOnBase.spec.diameter > 50, '只给修饰词时基于 base 放大，不被"已写明"误判');
+
+  const explicitWins = parsePrompt('直径6cm的球，胖一点', { kind: 'ball', diameter: 20, height: 20 });
+  eq(explicitWins.spec.diameter, 60, '提示词写明尺寸后，修饰词不再叠乘');
+
+  const armOnBase = parsePrompt('长10cm，粗2cm', { kind: 'ball', diameter: 90, height: 90 });
+  eq(armOnBase.spec.diameter, 20, 'base 已有直径时，提示词里的直径仍生效');
+  eq(armOnBase.spec.height, 100, 'base 已有高度时，提示词里的高度仍生效');
 }
 
 // ---------- 12. 拓扑图与力导向（graph.js / force.js） ----------

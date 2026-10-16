@@ -59,18 +59,23 @@ export function parsePrompt(text, base = {}) {
   }
 
   // ── ② 围度 → 直径（周长 = π·直径）──
+  let girthHit = false;
   const girth = raw.match(new RegExp(`(?:头围|周长|围度|胸围|一圈)\\s*(?:约|大概|大约)?\\s*${NUM}\\s*${UNIT}`));
   if (girth) {
     const mm = toMm(girth[1], girth[2], notes, '围度');
     if (mm) {
       spec.diameter = Math.round(mm / Math.PI);
+      girthHit = true;
       notes.push(`围度 ${mm}mm ÷ π → 直径 ${spec.diameter}mm`);
     }
   }
 
   // ── ③ 直径（关键词在前或在后两种说法）──
+  // 关键：**不要**因为 base 里已经有直径就跳过。
+  // base 是"当前状态"，不是"用户说过的话"——提示词里写明的尺寸必须覆盖它。
+  // （这个 bug 是端到端跑真实链路时才暴露的，单元测试因为不带 base 而漏掉了）
   let dHit = null;
-  if (spec.diameter === undefined) {
+  {
     const d1 = raw.match(new RegExp(`(?:直径|宽度|宽|粗细|粗)\\s*(?:约|大概|大约)?\\s*${NUM}\\s*${UNIT}`));
     const d2 = raw.match(new RegExp(`${NUM}\\s*${UNIT}\\s*(?:的)?\\s*(?:直径|宽|粗)`));
     dHit = d1 || d2;
@@ -100,7 +105,7 @@ export function parsePrompt(text, base = {}) {
   const allNums = [...raw.matchAll(new RegExp(`${NUM}\\s*${UNIT}`, 'g'))].filter((m) => m[2]);
   const consumed = new Set([girth?.[1], dHit?.[1], hHit?.[1]].filter(Boolean));
   const leftover = allNums.filter((m) => !consumed.has(m[1]));
-  if (spec.diameter === undefined && leftover.length) {
+  if (!girthHit && !dHit && leftover.length) {
     const mm = toMm(leftover[0][1], leftover[0][2], notes, '尺寸');
     if (mm) {
       spec.diameter = Math.round(mm);
@@ -109,9 +114,10 @@ export function parsePrompt(text, base = {}) {
   }
 
   // ── ⑥ 形容词微调 ──
-  // 关键：明确写了尺寸的，形容词不再叠乘（"长10cm + 细长"不该变成 12cm）
-  const explicitDiameter = spec.diameter !== undefined;
-  const explicitHeight = spec.height !== undefined;
+  // 只有**提示词里写明的**尺寸才拦得住形容词；base 里的值拦不住
+  // （否则「胖一点」会被误判成"你已写明直径"而完全不生效）
+  const explicitDiameter = girthHit || !!dHit;
+  const explicitHeight = !!hHit;
   const tweak = (re, fn, label) => {
     if (re.test(lower)) {
       fn();
