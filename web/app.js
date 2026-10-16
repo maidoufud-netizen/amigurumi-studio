@@ -1,9 +1,14 @@
 /**
- * 预览界面：剖面 → 针数序列 → 3D 回转体 + 逐圈高亮 + 侧视对照。
+ * 三维可视化：把图解渲染成可以看、可以数针的实体。
  *
- * 铁律（README 设计原则 1）：图解与预览同源。
- * 本文件不自己算任何针数，全部来自 src/build.js，
- * 所以 3D 显示的形状和文字图解**不可能**不一致——不一致就是 bug。
+ * 三个层次，从粗到细：
+ *   ① 曲面本体   —— 按每圈针数换算半径的回转体
+ *   ② 针目网格   —— 每一针在曲面上占一个格子（横向=圈边界，纵向=针与针的分界）
+ *   ③ 标尺       —— 每 10mm 一格，50mm 加长，用来读尺寸
+ *
+ * 关键点：②的每一根纵向网格线，角度来自 src/chart.js 的 layoutChart()，
+ * 也就是"这一针真正穿在上一圈哪一针上"的拓扑定位。
+ * 所以三维网格、符号图解、文字图解三者用的是同一份角度数据 —— 不可能对不上。
  */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -12,6 +17,7 @@ import { createPattern, roundTops, roundOps } from '../src/ir.js';
 import { buildPartFromProfile, PRESETS, normalizeProfile } from '../src/build.js';
 import { validatePattern, report } from '../src/validate.js';
 import { toText } from '../src/pattern.js';
+import { bodyBands, stitchGridSegments, rulerSegments } from '../src/solid.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -21,6 +27,8 @@ const state = {
   current: 1,
   part: null,
   plan: null,
+  showGrid: true,
+  showRuler: true,
 };
 
 /* ────────────────────────────── three.js 场景 ────────────────────────────── */
@@ -31,98 +39,122 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0xeef4fb);
+scene.background = new THREE.Color(0xeef2f7);
 
-const camera = new THREE.PerspectiveCamera(38, 1, 0.5, 20000);
+const camera = new THREE.PerspectiveCamera(36, 1, 0.5, 20000);
 const controls = new OrbitControls(camera, canvas);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 
-scene.add(new THREE.HemisphereLight(0xffffff, 0x33415a, 1.15));
-const keyLight = new THREE.DirectionalLight(0xffffff, 1.45);
-keyLight.position.set(60, 130, 90);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x3a4658, 1.2));
+const keyLight = new THREE.DirectionalLight(0xffffff, 1.35);
+keyLight.position.set(70, 140, 100);
 scene.add(keyLight);
 const fillLight = new THREE.DirectionalLight(0xffffff, 0.45);
-fillLight.position.set(-90, 30, -70);
+fillLight.position.set(-90, 40, -80);
 scene.add(fillLight);
+const rimLight = new THREE.DirectionalLight(0xffffff, 0.3);
+rimLight.position.set(0, -60, -100);
+scene.add(rimLight);
 
 const group = new THREE.Group();
 scene.add(group);
 
-const MAT = {
-  past: new THREE.MeshStandardMaterial({ color: 0x60a5fa, roughness: 0.92, side: THREE.DoubleSide }),
-  current: new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.75, side: THREE.DoubleSide }),
+const bodyMat = {
+  past: new THREE.MeshStandardMaterial({ color: 0x7ea6d8, roughness: 0.95, metalness: 0, side: THREE.DoubleSide }),
+  current: new THREE.MeshStandardMaterial({ color: 0xf0a63a, roughness: 0.8, metalness: 0, side: THREE.DoubleSide }),
   future: new THREE.MeshStandardMaterial({
-    color: 0xcbd5e1, roughness: 0.95, side: THREE.DoubleSide, transparent: true, opacity: 0.55,
+    color: 0xd3dbe6, roughness: 0.98, metalness: 0, side: THREE.DoubleSide, transparent: true, opacity: 0.62,
   }),
 };
+const gridMat = new THREE.LineBasicMaterial({ color: 0x8fa3ba, transparent: true, opacity: 0.5 });
+const rulerMat = new THREE.LineBasicMaterial({ color: 0x64748b, transparent: true, opacity: 0.85 });
 
-let bands = [];   // [{ mesh, round }]
+let bandMeshes = [];
+let gridObject = null;
+let rulerObject = null;
 
 function resize() {
   const w = canvas.clientWidth || 640;
   const h = canvas.clientHeight || 460;
-  renderer.setSize(w, h, false);   // false: 不改 CSS，避免 ResizeObserver 自激
+  renderer.setSize(w, h, false);   // false：不改 CSS，避免 ResizeObserver 自激
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
 }
 
-/**
- * 由针数序列推出回转体的环。
- * 第 n 圈占据 y ∈ [(n-1)h, nh]，中心 (n-0.5)h，半径 rₙ = cₙ·w/2π。
- * 环边界取相邻两圈半径的均值，首尾收成小口（模拟起针与收口）。
- */
-function ringsOf(counts, gauge) {
-  const n = counts.length;
-  const rs = counts.map((c) => (c * gauge.w) / (2 * Math.PI));
-  const rings = [{ y: 0, r: rs[0] * 0.42 }];
-  for (let i = 1; i < n; i++) rings.push({ y: i * gauge.h, r: (rs[i - 1] + rs[i]) / 2 });
-  rings.push({ y: n * gauge.h, r: rs[n - 1] * 0.42 });
-  return { rings, rs };
-}
-
-function rebuild3D() {
-  for (const b of bands) {
-    group.remove(b.mesh);
-    b.mesh.geometry.dispose();
+/* ① 曲面本体：每圈一个截锥段，便于逐圈高亮 */
+function buildBody(counts, gauge) {
+  for (const m of bandMeshes) {
+    group.remove(m);
+    m.geometry.dispose();
   }
-  bands = [];
-  if (!state.part) return;
-
-  const counts = state.part.rounds.map(roundTops);
-  const { rings } = ringsOf(counts, state.gauge);
-
-  for (let j = 1; j <= counts.length; j++) {
-    const a = rings[j - 1];
-    const b = rings[j];
+  bandMeshes = [];
+  for (const band of bodyBands(counts, gauge)) {
     const geo = new THREE.LatheGeometry(
-      [new THREE.Vector2(Math.max(a.r, 0.05), a.y), new THREE.Vector2(Math.max(b.r, 0.05), b.y)],
-      72,
+      [
+        new THREE.Vector2(Math.max(band.r0, 0.05), band.y0),
+        new THREE.Vector2(Math.max(band.r1, 0.05), band.y1),
+      ],
+      96,
     );
-    const mesh = new THREE.Mesh(geo, MAT.future);
-    mesh.userData.round = j;
+    const mesh = new THREE.Mesh(geo, bodyMat.future);
+    mesh.userData.round = band.round;
     group.add(mesh);
-    bands.push({ mesh, round: j });
+    bandMeshes.push(mesh);
   }
   applyHighlight();
-  fitCamera(counts);
+}
+
+/* ② 针目网格：横向圈边界 + 纵向针与针的分界（几何由 src/solid.js 算，可测） */
+function buildStitchGrid(part, gauge, counts) {
+  if (gridObject) {
+    group.remove(gridObject);
+    gridObject.geometry.dispose();
+    gridObject = null;
+  }
+  if (!state.showGrid) return;
+
+  const { positions, ok } = stitchGridSegments(part, gauge);
+  if (!ok || !positions.length) return;
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  gridObject = new THREE.LineSegments(geo, gridMat);
+  group.add(gridObject);
+}
+
+/* ③ 标尺：每 10mm 一格，50mm 加长（几何由 src/solid.js 算） */
+function buildRuler(counts, gauge) {
+  if (rulerObject) {
+    group.remove(rulerObject);
+    rulerObject.geometry.dispose();
+    rulerObject = null;
+  }
+  if (!state.showRuler) return;
+
+  const { positions } = rulerSegments(counts, gauge);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  rulerObject = new THREE.LineSegments(geo, rulerMat);
+  group.add(rulerObject);
 }
 
 function applyHighlight() {
-  for (const { mesh, round } of bands) {
-    mesh.material = round === state.current ? MAT.current : round < state.current ? MAT.past : MAT.future;
+  for (const mesh of bandMeshes) {
+    const n = mesh.userData.round;
+    mesh.material = n === state.current ? bodyMat.current : n < state.current ? bodyMat.past : bodyMat.future;
   }
 }
 
-function fitCamera(counts) {
-  const h = counts.length * state.gauge.h;
-  const maxR = (Math.max(...counts) * state.gauge.w) / (2 * Math.PI);
-  const d = Math.max(h, maxR * 2.2) * 1.5 + 40;
-  camera.position.set(d * 0.52, h * 0.72, d * 0.78);
-  camera.near = Math.max(0.5, d / 400);
+function fitCamera(counts, gauge) {
+  const H = counts.length * gauge.h;
+  const maxR = (Math.max(...counts) * gauge.w) / (2 * Math.PI);
+  const d = Math.max(H * 1.15, maxR * 3.4) * 1.42 + 40;
+  camera.position.set(d * 0.52, H * 0.68, d * 0.78);
+  camera.near = Math.max(0.5, d / 500);
   camera.far = d * 20;
   camera.updateProjectionMatrix();
-  controls.target.set(0, h / 2, 0);
+  controls.target.set(0, H / 2, 0);
   controls.update();
 }
 
@@ -161,7 +193,6 @@ function draw2D() {
   const X = (r) => W / 2 + r * sx;
   const Y = (y) => H - pad - y * sy;
 
-  // 中轴
   g.strokeStyle = '#e2e8f0';
   g.lineWidth = 1;
   g.beginPath();
@@ -169,7 +200,6 @@ function draw2D() {
   g.lineTo(W / 2, H - pad * 0.6);
   g.stroke();
 
-  // 目标轮廓（虚线）
   g.setLineDash([5, 4]);
   g.strokeStyle = '#94a3b8';
   g.lineWidth = 2;
@@ -178,14 +208,12 @@ function draw2D() {
   g.stroke();
   g.setLineDash([]);
 
-  // 实际（实线）
   g.strokeStyle = '#2563eb';
   g.lineWidth = 2.5;
   g.beginPath();
   actual.forEach((a, i) => (i ? g.lineTo(X(a.r), Y(a.y)) : g.moveTo(X(a.r), Y(a.y))));
   g.stroke();
 
-  // 当前圈
   const cur = actual[state.current - 1];
   if (cur) {
     g.strokeStyle = '#f59e0b';
@@ -255,14 +283,18 @@ function rebuild() {
   pattern.parts.push(part);
   const res = validatePattern(pattern);
 
+  const counts = part.rounds.map(roundTops);
+  buildBody(counts, state.gauge);
+  buildStitchGrid(part, state.gauge, counts);
+  buildRuler(counts, state.gauge);
+  fitCamera(counts, state.gauge);
+  draw2D();
+
   const out = [toText(pattern), '', '─'.repeat(36)];
   if (!res.issues.length) out.push('✅ 校验通过：结构合法，可以照着钩。');
   else out.push(report(res));
   out.push('');
-  out.push(
-    `整数化 + 约束偏差：最大 ${(plan.deviation.maxRel * 100).toFixed(1)}%` +
-      `（${plan.deviation.maxAbs.toFixed(2)} mm）`,
-  );
+  out.push(`整数化 + 约束偏差：最大 ${(plan.deviation.maxRel * 100).toFixed(1)}%（${plan.deviation.maxAbs.toFixed(2)} mm）`);
   if (plan.clamps.length) {
     out.push('被耦合约束修正的圈：');
     for (const c of plan.clamps) out.push(`  第 ${c.round} 圈 ${c.want} → ${c.got}（${c.reason}）`);
@@ -278,14 +310,13 @@ function rebuild() {
     issuesEl.innerHTML = '<div class="ok" style="margin-top:10px">✅ 结构合法，可以照着钩</div>';
   }
 
-  const peak = Math.max(...part.rounds.map(roundTops));
+  const peak = Math.max(...counts);
   const total = part.rounds.reduce((a, r) => a + roundOps(r), 0);
+  const H = rounds * state.gauge.h;
   $('stats').textContent =
     `共 ${rounds} 圈 · 峰值 ${peak} 针 · 合计 ${total} 针 · ` +
-    `成品约 Ø${((peak * state.gauge.w) / Math.PI).toFixed(1)}mm × 高 ${(rounds * state.gauge.h).toFixed(1)}mm`;
-
-  rebuild3D();
-  draw2D();
+    `成品约 Ø${((peak * state.gauge.w) / Math.PI).toFixed(1)}mm × 高 ${H.toFixed(1)}mm` +
+    `　（标尺：每格 10mm，长格 50mm）`;
 }
 
 /* ─────────────────────────────── 事件绑定 ─────────────────────────────── */
@@ -312,6 +343,14 @@ $('round').addEventListener('input', (e) => {
   $('rv').textContent = String(state.current);
   applyHighlight();
   draw2D();
+});
+$('grid').addEventListener('change', (e) => {
+  state.showGrid = e.target.checked;
+  rebuild();
+});
+$('ruler').addEventListener('change', (e) => {
+  state.showRuler = e.target.checked;
+  rebuild();
 });
 
 if (typeof ResizeObserver !== 'undefined') {

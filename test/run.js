@@ -9,6 +9,7 @@ import { planRound, spreadOps, clampForCoupling, buildPartFromProfile, PRESETS, 
 import { formatOps, toText, expandOps } from '../src/pattern.js';
 import { validatePattern } from '../src/validate.js';
 import { layoutChart, chartToSVG, chartStats } from '../src/chart.js';
+import { boundaryRings, bodyBands, stitchGridSegments, rulerSegments } from '../src/solid.js';
 
 let pass = 0;
 let fail = 0;
@@ -200,6 +201,51 @@ function createPatternWith(part) {
   eq(st.peak, 30, 'chartStats 峰值正确');
   eq(st.peakRound, 5, 'chartStats 峰值所在圈正确');
   eq(st.last, 6, 'chartStats 收口正确');
+}
+
+// ---------- 9. 三维几何数据（solid.js） ----------
+{
+  const gauge = { w: 5, h: 5 };
+  const counts = [6, 12, 18, 24, 30, 24, 18, 12, 6];
+  const rounds = [{ n: 1, ops: [{ op: 'sc', count: 6 }] }];
+  for (let i = 1; i < counts.length; i++) rounds.push(planRound(counts[i - 1], counts[i], i + 1));
+  const ball = createPart({ id: 'ball', rounds });
+
+  const { rings, radii } = boundaryRings(counts, gauge);
+  eq(rings.length, counts.length + 1, '圈边界数 == 圈数 + 1');
+  let yMono = true;
+  for (let i = 1; i < rings.length; i++) if (!(rings[i].y > rings[i - 1].y)) yMono = false;
+  ok(yMono, '圈边界的 y 严格递增（回转体不自交的充要条件）');
+  ok(rings.every((r) => r.r >= 0), '所有边界半径非负');
+  ok(rings[0].r < Math.max(...rings.map((x) => x.r)), '两端是收口小口（球体半径先增后减，不单调是对的）');
+  eq(radii[4], (30 * 5) / (2 * Math.PI), '第 5 圈半径 == c·w/2π');
+
+  const bands = bodyBands(counts, gauge);
+  eq(bands.length, counts.length, '曲面分段数 == 圈数');
+  eq(bands.map((b) => b.round), counts.map((_, i) => i + 1), '每段挂着正确的圈号（逐圈高亮靠它）');
+  eq(bands[0].y0, 0, '第一段从 y=0 起');
+  eq(bands[bands.length - 1].y1, counts.length * gauge.h, '最后一段到总高度');
+
+  const grid = stitchGridSegments(ball, gauge);
+  eq(grid.ok, true, '针目网格生成成功');
+  eq(grid.verticalCounts, counts, '每圈纵向网格线数 == 该圈针数（数格子 = 数针）');
+  eq(grid.positions.length % 6, 0, '线段端点成对（每 6 个数字一段）');
+  ok(grid.positions.every((v) => Number.isFinite(v)), '网格坐标全是有限数');
+
+  const ruler = rulerSegments(counts, gauge);
+  eq(ruler.height, counts.length * gauge.h, '标尺高度 == 成品高度');
+  eq(ruler.ticks, Math.floor(ruler.height / 10) + 1, '刻度数 == 高度/10 + 1');
+
+  const bad = createPart({
+    id: 'bad',
+    rounds: [
+      { n: 1, ops: [{ op: 'sc', count: 6 }] },
+      { n: 2, ops: [{ op: 'sc', count: 4 }, { op: 'inc', count: 1 }] },
+    ],
+  });
+  const gb = stitchGridSegments(bad, gauge);
+  eq(gb.ok, false, '不可钩的图解拒绝生成三维网格');
+  ok(typeof gb.error === 'string' && gb.error.length > 0, '拒绝时给出原因');
 }
 
 // ---------- 结果 ----------
