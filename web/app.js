@@ -17,6 +17,8 @@ import { createPattern, roundTops, roundOps } from '../src/ir.js';
 import { buildPartFromProfile, normalizeProfile } from '../src/build.js';
 import { profileFromSpec, normalizeSpec, describeSpec } from '../src/shape.js';
 import { parsePrompt } from '../src/prompt.js';
+import { buildAssembly, assemblyToPattern, describeAssembly } from '../src/assembly.js';
+import { graphFromPart } from '../src/graph.js';
 import { validatePattern, report } from '../src/validate.js';
 import { toText } from '../src/pattern.js';
 import { fitView } from '../src/solid.js';
@@ -29,6 +31,8 @@ const MAX_NODES = 6000;
 const state = {
   // 形状规格是"人话参数"，提示词与形状控件都写到这里，再由 shape.js 变成剖面
   spec: { kind: 'ball', diameter: 50, height: 50 },
+  // 装配体（多部件 + 挂载）。非空时优先于 spec —— 章鱼这种结构只能这么表达
+  assembly: null,
   profileOverride: false,   // 手改过剖面曲线后置 true，此时剖面优先于规格
   gauge: { w: 5, h: 5 },
   current: 1,
@@ -243,12 +247,12 @@ function onWorkerMessage(ev) {
 
 if (worker) worker.onmessage = onWorkerMessage;
 
-function startLayout(part) {
+function startLayout(graph) {
   state.fitted = false;
   stopFallback();
   const payload = {
     type: 'init',
-    part: { id: part.id, rounds: part.rounds },
+    graph,
     gauge: state.gauge,
     options: { guideStrength: 0.06, chargeStrength: -6, chargeCutoff: 7 },
     stepsPerFrame: 3,
@@ -259,30 +263,25 @@ function startLayout(part) {
     return;
   }
   // 主线程兜底：结构一样，只是会和渲染抢时间
-  const graphPart = payload.part;
-  import('../src/graph.js').then(async ({ graphFromPart }) => {
-    const { createPart } = await import('../src/ir.js');
-    const graph = graphFromPart(createPart(graphPart), state.gauge);
-    fallbackSim = createSimulation(graph, { linkDistance: state.gauge.w, ...payload.options });
-    nodeMeta = fallbackSim.nodes.map((n) => ({ round: n.round, chain: n.chain }));
-    const at = new Map(fallbackSim.nodes.map((n, i) => [n.id, i]));
-    linkPairs = Int32Array.from(
-      fallbackSim.links.flatMap((l) => [at.get(l.source), at.get(l.target)]),
-    );
-    const pump = () => {
-      if (!fallbackSim) return;
-      for (let i = 0; i < 3 && fallbackSim.alpha > 0; i++) fallbackSim.tick();
-      const flat = new Float32Array(fallbackSim.nodes.length * 3);
-      fallbackSim.nodes.forEach((n, i) => {
-        flat[i * 3] = n.x; flat[i * 3 + 1] = n.y; flat[i * 3 + 2] = n.z;
-      });
-      applyPositions(flat);
-      if (!state.fitted) { fitCameraToNodes(flat); state.fitted = true; }
-      if (fallbackSim.alpha > 0) fallbackRaf = requestAnimationFrame(pump);
-      else { $('status').textContent = `收敛完成（${fallbackSim.ticks} 步）`; fitCameraToNodes(flat); }
-    };
-    pump();
-  });
+  fallbackSim = createSimulation(graph, { linkDistance: state.gauge.w, ...payload.options });
+  nodeMeta = fallbackSim.nodes.map((n) => ({ round: n.round, chain: n.chain }));
+  const at = new Map(fallbackSim.nodes.map((n, i) => [n.id, i]));
+  linkPairs = Int32Array.from(
+    fallbackSim.links.flatMap((l) => [at.get(l.source), at.get(l.target)]),
+  );
+  const pump = () => {
+    if (!fallbackSim) return;
+    for (let i = 0; i < 3 && fallbackSim.alpha > 0; i++) fallbackSim.tick();
+    const flat = new Float32Array(fallbackSim.nodes.length * 3);
+    fallbackSim.nodes.forEach((n, i) => {
+      flat[i * 3] = n.x; flat[i * 3 + 1] = n.y; flat[i * 3 + 2] = n.z;
+    });
+    applyPositions(flat);
+    if (!state.fitted) { fitCameraToNodes(flat); state.fitted = true; }
+    if (fallbackSim.alpha > 0) fallbackRaf = requestAnimationFrame(pump);
+    else { $('status').textContent = `收敛完成（${fallbackSim.ticks} 步）`; fitCameraToNodes(flat); }
+  };
+  pump();
 }
 
 /* ────────────────────────── 2D 侧视：目标 vs 实际 ────────────────────────── */
@@ -299,6 +298,12 @@ function draw2D() {
   const g = c.getContext('2d');
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, W, H);
+  if (state.assembly) {
+    g.fillStyle = '#94a3b8';
+    g.font = '13px sans-serif';
+    g.fillText('装配体没有单一侧视轮廓 —— 请看三维视图与右侧文字图解', 16, 26);
+    return;
+  }
   if (!state.part || !state.plan) return;
 
   const counts = state.part.rounds.map(roundTops);
@@ -363,6 +368,7 @@ function parseProfile(text) {
 
 /** 把形状规格落地：更新输入控件，并把生成的剖面写进文本框 */
 function applySpec(spec, { silent = false } = {}) {
+  state.assembly = null;          // 回到单件模式
   state.spec = normalizeSpec(spec);
   state.profileOverride = false;
   const pts = profileFromSpec(state.spec);
@@ -371,6 +377,30 @@ function applySpec(spec, { silent = false } = {}) {
   $('dia').value = String(Math.round(state.spec.diameter));
   $('hei').value = String(Math.round(state.spec.height));
   if (!silent) setNotes(describeSpec(state.spec));
+}
+
+/**
+ * 装配体模式：多部件 + 挂载。
+ * 注意不要调 applySpec —— 那会把 assembly 清掉（它就是用来退出装配体的）。
+ */
+function applyAssembly(assembly) {
+  state.assembly = assembly;
+  state.profileOverride = false;
+  const root = (assembly.parts || []).find((p) => !p.attach);
+  if (root) {
+    // 主体形状回填到控件，方便用户继续微调主体尺寸
+    state.spec = normalizeSpec({
+      kind: root.kind,
+      diameter: root.diameter,
+      height: root.height,
+      widestAt: root.widestAt,
+      bottomRatio: root.bottomRatio,
+      topRatio: root.topRatio,
+    });
+    $('kind').value = state.spec.kind;
+    $('dia').value = String(Math.round(state.spec.diameter));
+    $('hei').value = String(Math.round(state.spec.height));
+  }
 }
 
 /** 当前该用哪份剖面：手改过就用文本框，否则由规格生成 */
@@ -461,7 +491,15 @@ async function generateFromPrompt() {
 
     const answer = await pollAnswer(id);
     if (answer) {
-      applySpec(answer.spec, { silent: true });
+      // AI 可以回两种东西：单件规格（spec）或多部件装配（assembly）
+      if (answer.assembly) {
+        applyAssembly(answer.assembly);
+      } else if (answer.spec) {
+        applySpec(answer.spec, { silent: true });
+      } else {
+        setNotes('AI 回了结果，但既没有 spec 也没有 assembly。');
+        return;
+      }
       setNotes(`${answer.answeredBy || 'AI'}：${(answer.notes || []).join('　·　') || '（无说明）'}`);
       state.current = 1;
       rebuild();
@@ -491,38 +529,74 @@ function rebuild() {
   $('wv').textContent = state.gauge.w.toFixed(1);
   $('hv').textContent = state.gauge.h.toFixed(1);
 
-  let part;
-  let plan;
-  try {
-    const r = buildPartFromProfile(currentProfilePoints(), state.gauge, { id: 'head' });
-    part = r.part;
-    plan = r.plan;
-  } catch (e) {
-    $('pattern').textContent = '剖面解析失败：' + e.message;
-    return;
-  }
-  state.part = part;
-  state.plan = plan;
+  let graph = null;
+  let pattern = null;
+  let counts = null;
+  let plan = null;
+  let modeText = '';
 
-  const rounds = part.rounds.length;
+  if (state.assembly) {
+    // ── 装配体：多部件 + 挂载（章鱼、带腿带耳朵的玩偶走这条）──
+    let built;
+    try {
+      built = buildAssembly(state.assembly, state.gauge);
+    } catch (e) {
+      $('pattern').textContent = '装配体有误：' + e.message;
+      $('issues').className = 'warnbox';
+      $('issues').textContent = e.message;
+      return;
+    }
+    graph = built.graph;
+    pattern = assemblyToPattern(state.assembly, state.gauge).pattern;
+    counts = built.root.counts;
+    state.part = built.root.part;
+    const copies = built.attachments.reduce((a, x) => a + x.count, 0);
+    modeText = `装配体：${built.built.length} 种部件 / ${copies} 个挂件`;
+    $('profile').value = built.built
+      .map((p) => `${p.id}${p.attach ? ` ×${p.attach.count}` : '（主体）'}：`
+        + `${p.counts.length} 圈，峰值 ${Math.max(...p.counts)} 针`)
+      .join('\n');
+  } else {
+    // ── 单件：一个回转体 ──
+    let r;
+    try {
+      r = buildPartFromProfile(currentProfilePoints(), state.gauge, { id: 'head' });
+    } catch (e) {
+      $('pattern').textContent = '剖面解析失败：' + e.message;
+      return;
+    }
+    state.part = r.part;
+    state.plan = r.plan;
+    plan = r.plan;
+    counts = r.part.rounds.map(roundTops);
+    pattern = createPattern({ name: '预览部件', gauge: state.gauge });
+    pattern.parts.push(r.part);
+    graph = graphFromPart(r.part, state.gauge);
+    modeText = '单件';
+  }
+
+  // 圈滑杆按图里实际出现的最大圈号来
+  const rounds = Math.max(1, ...graph.nodes.map((n) => n.round || 1));
   state.rounds = rounds;
   if (state.current > rounds) state.current = rounds;
   if (state.current < 1) state.current = 1;
-  const slider = $('round');
-  slider.max = String(rounds);
-  slider.value = String(state.current);
+  $('round').max = String(rounds);
+  $('round').value = String(state.current);
   $('rv').textContent = String(state.current);
 
-  const pattern = createPattern({ name: '预览部件', gauge: state.gauge });
-  pattern.parts.push(part);
   const res = validatePattern(pattern);
 
   const out = [toText(pattern), '', '─'.repeat(36)];
   out.push(res.issues.length ? report(res) : '✅ 校验通过：结构合法，可以照着钩。');
-  out.push(`整数化偏差：最大 ${(plan.deviation.maxRel * 100).toFixed(1)}%（${plan.deviation.maxAbs.toFixed(2)} mm）`);
-  if (plan.clamps.length) {
-    out.push('被耦合约束修正的圈：');
-    for (const c of plan.clamps) out.push(`  第 ${c.round} 圈 ${c.want} → ${c.got}（${c.reason}）`);
+  if (plan) {
+    out.push(`整数化偏差：最大 ${(plan.deviation.maxRel * 100).toFixed(1)}%（${plan.deviation.maxAbs.toFixed(2)} mm）`);
+    if (plan.clamps.length) {
+      out.push('被耦合约束修正的圈：');
+      for (const c of plan.clamps) out.push(`  第 ${c.round} 圈 ${c.want} → ${c.got}（${c.reason}）`);
+    }
+  }
+  if (state.assembly) {
+    out.push('', '装配说明：', describeAssembly(state.assembly));
   }
   $('pattern').textContent = out.join('\n');
 
@@ -535,19 +609,17 @@ function rebuild() {
     issuesEl.innerHTML = '<div class="ok" style="margin-top:10px">✅ 结构合法，可以照着钩</div>';
   }
 
-  const counts = part.rounds.map(roundTops);
   const peak = Math.max(...counts);
-  const totalOps = part.rounds.reduce((a, r) => a + roundOps(r), 0);
   $('stats').textContent =
-    `共 ${rounds} 圈 · 峰值 ${peak} 针 · 合计 ${totalOps} 针 · `
-    + `成品约 Ø${((peak * state.gauge.w) / Math.PI).toFixed(1)}mm × 高 ${(rounds * state.gauge.h).toFixed(1)}mm`
+    `${modeText} · 共 ${rounds} 圈 · 峰值 ${peak} 针 · `
+    + `图规模 ${graph.nodes.length} 针目 / ${graph.links.length} 耦合`
     + `　（每个小球 = 一针，连线 = 耦合关系）
 渲染：${glInfo} · 求解在 ${worker ? 'Worker' : '主线程（兜底）'}`;
 
   resize();
   // 先启动三维求解，再画 2D 侧视：2D 只是辅助视图，
   // 万一它出错也不该把三维拖下水（之前就是顺序反了，导致三维一直不出）
-  startLayout(part);
+  startLayout(graph);
   try {
     draw2D();
   } catch (err) {

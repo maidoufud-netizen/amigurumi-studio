@@ -14,6 +14,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { normalizeSpec, describeSpec, profileFromSpec } from '../src/shape.js';
+import { normalizeAssembly, buildAssembly, describeAssembly } from '../src/assembly.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const QUEUE = join(here, 'ai-queue.json');
@@ -73,18 +74,26 @@ if (cmd === 'list') {
     process.exit(1);
   }
   const rawSpec = arg('spec');
-  if (!rawSpec) {
-    console.error('缺少 --spec（形状规格 JSON）');
+  const rawAssembly = arg('assembly');
+  if (!rawSpec && !rawAssembly) {
+    console.error('缺少 --spec（单件形状 JSON）或 --assembly（多部件装配 JSON）');
     process.exit(1);
   }
 
-  let spec;
+  let spec = null;
+  let assembly = null;
   try {
-    spec = normalizeSpec(await loadSpec(rawSpec));
-    // 立刻算一遍剖面，能在这一步就发现"规格合法但几何不成立"的情况
-    const profile = profileFromSpec(spec);
-    if (!profile.length || profile.some((p) => !Number.isFinite(p.r) || !Number.isFinite(p.h))) {
-      throw new Error('剖面里有非法数值');
+    if (rawAssembly) {
+      assembly = normalizeAssembly(await loadSpec(rawAssembly));
+      // 真跑一遍建图：规格可能合法但结构不成立（比如挂到不存在的圈）
+      const built = buildAssembly(assembly, { w: 5, h: 5 });
+      if (!built.graph.nodes.length) throw new Error('建图得到空图');
+    } else {
+      spec = normalizeSpec(await loadSpec(rawSpec));
+      const profile = profileFromSpec(spec);
+      if (!profile.length || profile.some((p) => !Number.isFinite(p.r) || !Number.isFinite(p.h))) {
+        throw new Error('剖面里有非法数值');
+      }
     }
   } catch (err) {
     console.error(`规格被拒绝：${err.message}`);
@@ -93,6 +102,7 @@ if (cmd === 'list') {
 
   const notes = (arg('notes') || '').split('|').map((s) => s.trim()).filter(Boolean);
   r.spec = spec;
+  r.assembly = assembly;
   r.notes = notes;
   r.status = 'answered';
   r.answeredAt = new Date().toISOString();
@@ -101,7 +111,12 @@ if (cmd === 'list') {
 
   console.log(`✅ 已答复 ${id}`);
   console.log(`   ${r.prompt}`);
-  console.log(`   → ${describeSpec(spec)}`);
+  if (assembly) {
+    console.log('   → 装配体：');
+    console.log(describeAssembly(assembly).split('\n').map((l) => `     ${l}`).join('\n'));
+  } else {
+    console.log(`   → ${describeSpec(spec)}`);
+  }
   if (notes.length) console.log(`   说明：${notes.join('；')}`);
   console.log('   页面会自动取到结果（它在轮询 /api/prompt）。');
 } else if (cmd === 'clear') {

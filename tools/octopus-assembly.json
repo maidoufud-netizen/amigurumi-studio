@@ -1,0 +1,9 @@
+{
+  "name": "章鱼",
+  "parts": [
+    { "id": "head", "kind": "ball", "diameter": 46, "height": 52 },
+    { "id": "leg", "kind": "cone", "diameter": 14, "height": 44,
+      "attach": { "to": "head", "round": "last", "count": 8, "spread": 1.5 } }
+  ],
+  "gauge": { "w": 5, "h": 5 }
+}

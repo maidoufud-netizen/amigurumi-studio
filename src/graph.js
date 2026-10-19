@@ -24,31 +24,38 @@ function ringLinks(list, links, kind = 'ring') {
  * IR 部件 → 拓扑图。
  * 第 1 圈没有上一圈可依附，按环铺设；之后每圈按"消耗了上一圈哪些针目"连边。
  */
-export function graphFromPart(part, gauge = { w: 5, h: 5 }) {
+export function graphFromPart(part, gauge = { w: 5, h: 5 }, options = {}) {
   const nodes = [];
   const links = [];
   const { w = 5, h = 5 } = gauge;
+  // seedDir = -1：圈号越大越低。装配体用这个朝向，让"最后一圈"落在底部，
+  // 挂件（腿 / 触手）才能自然往下长——这个坑在章鱼那轮踩过。
+  const dir = options.seedDir === -1 ? -1 : 1;
+  const partId = options.partId ?? part.id ?? 'part';
 
   const seedRing = (list, round) => {
     const r = Math.max(0.4, (list.length * w) / (2 * Math.PI));
+    const y = dir * (round - 0.5) * h;
     list.forEach((n, i) => {
       const a = (2 * Math.PI * i) / list.length;
-      n.seed = { x: r * Math.cos(a), y: (round - 0.5) * h, z: r * Math.sin(a) };
+      n.seed = { x: r * Math.cos(a), y, z: r * Math.sin(a) };
       // 解析式目标：圈半径 = 针数 × 针宽 / 2π。
       // 这不是"作弊"，而是把已知的纤维约束交给物理：
       // 板块类部件有闭式解，就用它引导收敛；触手那种没有解的，target 为空，让物理自由发挥。
-      n.target = { r, y: (round - 0.5) * h };
+      n.target = { r, y };
     });
+  };
+
+  const mk = (round, index) => {
+    const n = { id: `r${round}s${index}`, round, index, partId };
+    nodes.push(n);
+    return n;
   };
 
   const seq1 = expandOps(part.rounds[0].ops);
   let prev = [];
   for (const op of seq1) {
-    for (let k = 0; k < OP[op].tops; k++) {
-      const n = { id: `r1s${prev.length}`, round: 1, index: prev.length };
-      nodes.push(n);
-      prev.push(n);
-    }
+    for (let k = 0; k < OP[op].tops; k++) prev.push(mk(1, prev.length));
   }
   seedRing(prev, 1);
   ringLinks(prev, links);
@@ -66,15 +73,13 @@ export function graphFromPart(part, gauge = { w: 5, h: 5 }) {
       cursor += spec.bases;
 
       if (spec.tops === 1) {
-        const n = { id: `r${i + 1}s${cur.length}`, round: i + 1, index: cur.length };
-        nodes.push(n);
+        const n = mk(i + 1, cur.length);
         for (const b of bases) links.push({ source: n.id, target: b.id, kind: 'couple' });
         cur.push(n);
       } else {
         // 一针出两针：两个新针目都挂在同一个基针上
         for (let k = 0; k < spec.tops; k++) {
-          const n = { id: `r${i + 1}s${cur.length}`, round: i + 1, index: cur.length };
-          nodes.push(n);
+          const n = mk(i + 1, cur.length);
           links.push({ source: n.id, target: bases[0].id, kind: 'couple' });
           cur.push(n);
         }
@@ -95,10 +100,17 @@ export function graphFromPart(part, gauge = { w: 5, h: 5 }) {
  * 在某个针目上接一条链（触手、腿、耳朵…）。
  * 这就是回转体做不到的事：从图的任意节点长出新分支。
  */
-export function attachChain(graph, { fromId, counts, spread = 1.2 }, gauge = graph.gauge) {
+export function attachChain(graph,
+  { fromId, counts, spread = 1.2, partId = null, copyIndex = 0, seedAngle = null, seedSpread = 0 },
+  gauge = graph.gauge) {
   const { w = 5, h = 5 } = gauge;
   const anchor = graph.nodes.find((n) => n.id === fromId);
   if (!anchor) throw new Error(`找不到锚点 ${fromId}`);
+
+  // 种子的横向方向：优先用给定的方位角，让多条挂件像章鱼腿那样各朝一个方向外张。
+  // 只按"锚点半径 × spread"的话，挂在收口圈上的挂件会全部叠在一起（踩过这个坑）。
+  const dirX = seedAngle === null ? null : Math.cos(seedAngle);
+  const dirZ = seedAngle === null ? null : Math.sin(seedAngle);
 
   const added = [];
   let prevRing = [anchor];
@@ -107,16 +119,25 @@ export function attachChain(graph, { fromId, counts, spread = 1.2 }, gauge = gra
     const ring = [];
     for (let j = 0; j < count; j++) {
       const a = (2 * Math.PI * j) / count;
+      const outward = r + step * seedSpread;      // 越往下越向外
       const node = {
         id: `${fromId}-c${step}-${j}`,
         round: (anchor.round ?? 0) + step + 1,
         index: j,
         chain: true,
-        seed: {
-          x: anchor.seed.x * spread + r * Math.cos(a),
-          y: anchor.seed.y - (step + 1) * h,      // 往下垂
-          z: anchor.seed.z * spread + r * Math.sin(a),
-        },
+        partId: partId || `${anchor.partId || 'root'}-chain`,
+        copyIndex,
+        seed: dirX !== null
+          ? {
+            x: anchor.seed.x + dirX * outward + r * Math.cos(a) * 0.3,
+            y: anchor.seed.y - (step + 1) * h,
+            z: anchor.seed.z + dirZ * outward + r * Math.sin(a) * 0.3,
+          }
+          : {
+            x: anchor.seed.x * spread + r * Math.cos(a),
+            y: anchor.seed.y - (step + 1) * h,
+            z: anchor.seed.z * spread + r * Math.sin(a),
+          },
       };
       graph.nodes.push(node);
       ring.push(node);

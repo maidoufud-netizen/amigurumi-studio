@@ -32,8 +32,10 @@ self.onmessage = (event) => {
 
   if (msg.type === 'init') {
     stop();
-    const part = createPart({ id: msg.part.id || 'part', rounds: msg.part.rounds });
-    const graph = graphFromPart(part, msg.gauge);
+    // 两种入口：直接给图（装配体走这条），或给 IR 部件由这里建图（单件）
+    const graph = msg.graph
+      ? msg.graph
+      : graphFromPart(createPart({ id: msg.part.id || 'part', rounds: msg.part.rounds }), msg.gauge);
 
     sim = createSimulation(graph, {
       linkDistance: msg.gauge.w,

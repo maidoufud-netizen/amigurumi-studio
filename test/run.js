@@ -14,6 +14,7 @@ import { profileFromSpec, normalizeSpec, radiusRatio, estimate } from '../src/sh
 import { parsePrompt } from '../src/prompt.js';
 import { graphFromPart, octopusGraph, graphStats } from '../src/graph.js';
 import { createSimulation, sampleFrames } from '../src/force.js';
+import { normalizeAssembly, buildAssembly, assemblyToPattern, describeAssembly } from '../src/assembly.js';
 
 let pass = 0;
 let fail = 0;
@@ -429,6 +430,86 @@ function createPatternWith(part) {
   const { frames } = sampleFrames(sphere, { steps: 40, every: 10, linkDistance: gauge.w });
   eq(frames.length, 4, 'sampleFrames 按间隔产出 4 帧');
   eq(frames[0].length, sphere.nodes.length, '每帧包含全部节点');
+}
+
+// ---------- 13. 多部件装配（assembly.js） ----------
+{
+  const gauge = { w: 5, h: 5 };
+  const octo = {
+    name: '章鱼',
+    parts: [
+      { id: 'head', kind: 'ball', diameter: 46, height: 52 },
+      { id: 'leg', kind: 'cone', diameter: 14, height: 44,
+        attach: { to: 'head', round: 'last', count: 8 } },
+    ],
+  };
+
+  const { graph, attachments, root } = buildAssembly(octo, gauge);
+  eq(attachments.length, 1, '装配体有 1 个挂载关系');
+  eq(attachments[0].count, 8, '挂了 8 条腿');
+  const rootStitches = root.counts.reduce((a, b) => a + b, 0);
+  ok(graph.nodes.length > rootStitches, `总针目数多于主体（${graph.nodes.length} > ${rootStitches}）`);
+  ok(graph.nodes.every((n) => n.partId), '每个节点都标注了所属部件');
+  eq(new Set(graph.nodes.map((n) => n.id)).size, graph.nodes.length, '节点 id 唯一');
+  const chainNodes = graph.nodes.filter((n) => n.chain);
+  ok(chainNodes.length === graph.nodes.length - rootStitches, '挂件节点数 = 总节点数 − 主体针数');
+
+  // 朝向：主体第 1 圈在上、最后一圈在下，挂件继续往下
+  const ringY = (r) => {
+    const list = graph.nodes.filter((n) => n.partId === 'head' && n.round === r);
+    return list.reduce((s, n) => s + n.seed.y, 0) / list.length;
+  };
+  const y1 = ringY(1);
+  const yLast = ringY(root.counts.length);
+  ok(y1 > yLast, `主体第 1 圈在最后一圈上方（${y1.toFixed(1)} > ${yLast.toFixed(1)}）`);
+  ok(Math.min(...chainNodes.map((n) => n.seed.y)) < yLast, '挂件种子在主体下方（会往下长）');
+
+  // 8 条腿的起点应分布在不同方位，而不是叠在同一个锚点上
+  const firstRing = chainNodes.filter((n) => n.round === root.counts.length + 1);
+  const angles = new Set(firstRing.map((n) => Math.round(Math.atan2(n.seed.z, n.seed.x) / 2)));
+  ok(angles.size >= 4, `第 1 圈挂件种子分布在 ${angles.size} 个方位（不是叠成一坨）`);
+
+  // 错误必须被拦住，且信息说得清
+  throws(() => normalizeAssembly({ parts: [{ id: 'a', kind: 'ball' }, { id: 'b', kind: 'ball' }] }),
+    '两个主体（没有唯一根）被拒绝');
+  throws(() => normalizeAssembly({ parts: [{ id: 'a', kind: 'ball', attach: { to: 'nope' } }] }),
+    '挂到未定义部件被拒绝');
+  throws(() => normalizeAssembly({ parts: [{ id: 'a', kind: 'ball' }, { id: 'a', kind: 'ball' }] }),
+    '部件 id 重复被拒绝');
+  throws(() => normalizeAssembly({ parts: [
+    { id: 'a', kind: 'ball' },
+    { id: 'b', kind: 'ball', attach: { to: 'a', count: 0 } },
+  ] }), 'count = 0 被拒绝');
+  throws(() => buildAssembly({ parts: [
+    { id: 'a', kind: 'ball' },
+    { id: 'b', kind: 'ball', attach: { to: 'a', round: 99 } },
+  ] }, gauge), '挂到不存在的圈被拒绝');
+
+  // 文字图解：每个部件只列一次，×N 写在备注里
+  const { pattern } = assemblyToPattern(octo, gauge);
+  eq(pattern.parts.length, 2, '图案里只有 2 个部件（8 条腿合并成 1 份图解）');
+  const legPart = pattern.parts.find((p) => p.id === 'leg');
+  ok(/8/.test(legPart.note), `腿的备注写明数量（实际：${legPart.note}）`);
+  eq(validatePattern(pattern).issues.length, 0, '装配体的图案通过结构校验');
+
+  // 幂等性回归：把规范化过的装配体再喂回去，部件尺寸不能丢。
+  // 之前会丢（二次规范化把部件换成默认的球 Ø50，章鱼从 499 针涨到 1809 针），
+  // 而网页每次 rebuild 都会走一遍这条路径。
+  const once = normalizeAssembly(octo);
+  const twice = normalizeAssembly(once);
+  eq(twice.parts[0].spec.diameter, 46, '二次规范化保留主体直径');
+  eq(twice.parts[1].spec.kind, 'cone', '二次规范化保留挂件形状');
+  eq(twice.parts[1].spec.diameter, 14, '二次规范化保留挂件直径');
+  eq(twice.parts[1].attach.count, 8, '二次规范化保留挂载数量');
+  const g1 = buildAssembly(octo, gauge).graph.nodes.length;
+  const g2 = buildAssembly(once, gauge).graph.nodes.length;
+  const g3 = buildAssembly(twice, gauge).graph.nodes.length;
+  eq(g2, g1, `规范化一次后装配结果不变（${g1} 节点）`);
+  eq(g3, g1, `规范化两次后装配结果仍不变（${g1} 节点）`);
+
+  const desc = describeAssembly(octo);
+  ok(desc.includes('head') && desc.includes('leg'), '装配说明包含两个部件');
+  ok(desc.includes('8'), '装配说明写明腿的数量');
 }
 
 // ---------- 结果 ----------
