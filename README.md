@@ -134,12 +134,12 @@ python tools/render.py tools/scene.json chart.png --chart     # 符号图解
 | [`tools/viewer.py`](tools/viewer.py) | **原生渲染窗口**：拖动旋转、滚轮缩放、逐圈高亮、导出 PNG |
 | [`docs/spec.md`](docs/spec.md) | 图解语法规范 v0.1：IR、文字语法、符号表、校验规则 |
 | [`docs/architecture.md`](docs/architecture.md) | 架构与数据流逻辑图（Mermaid，GitHub 直接渲染） |
-| [`test/run.js`](test/run.js) | 零依赖测试：覆盖耦合守恒、构建与夹紧、校验器、文字与符号图解、三维几何、形状、提示词、力导向、多部件装配 |
+| [`test/run.js`](test/run.js) | 零依赖测试：**149 项全部通过**，覆盖耦合守恒、构建与夹紧、校验器、文字与符号图解、三维几何、形状、提示词、力导向、多部件装配 |
 
 ## 跑起来
 
 ```bash
-node test/run.js          # 跑测试，无需安装任何依赖
+node test/run.js          # 跑测试，149 项，无需安装任何依赖
 node scripts/serve.js     # 本地预览，然后打开：
                           #   三维可视化   http://127.0.0.1:5173/web/
                           #   图解可视化   http://127.0.0.1:5173/web/chart.html
