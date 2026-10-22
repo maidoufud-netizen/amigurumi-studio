@@ -122,27 +122,31 @@ python tools/render.py tools/scene.json chart.png --chart     # 符号图解
 | [`src/chart.js`](src/chart.js) | IR → **环形符号图解** SVG：每一针按它真正穿的那一针定位 |
 | [`src/shape.js`](src/shape.js) | 形状规格（直径/高/最粗处/收口）→ 剖面曲线；**强制采到最粗处**，保证峰值针数兑现设定尺寸 |
 | [`src/prompt.js`](src/prompt.js) | 提示词 → 形状规格（规则解析，含单位换算、围度÷π、形容词微调与回显说明） |
+| [`src/graph.js`](src/graph.js) · [`src/force.js`](src/force.js) | 拓扑图 + 力导向求解：节点 = 针目、边 = 耦合，任意拓扑都能出几何 |
+| [`src/assembly.js`](src/assembly.js) | 多部件装配：把单件规格扩成「主体 + ×N 挂件」的挂载树 |
 | [`src/solid.js`](src/solid.js) | IR → **三维几何数据**（纯数字数组，不依赖 three.js，可在 Node 里测） |
 | [`web/index.html`](web/index.html) · [`web/app.js`](web/app.js) | **三维可视化窗口**：实体 + 针目网格 + 逐圈高亮 + 标尺 + 侧视对照 |
 | [`web/chart.html`](web/chart.html) · [`web/chart.js`](web/chart.js) | 图解可视化窗口：符号图解 + 统计 + 打印 |
-| [`scripts/serve.js`](scripts/serve.js) | 零依赖静态服务器，供两个预览页使用 |
+| [`scripts/serve.js`](scripts/serve.js) | 零依赖静态服务器，供两个预览页使用；另提供 `/api/prompt` 提示词桥 |
+| [`tools/ai-bridge.mjs`](tools/ai-bridge.mjs) | AI 提示词桥（命令行端）：受限 JSON 规格经 `normalizeSpec` 校验后回写队列 |
 | [`tools/emit-scene.mjs`](tools/emit-scene.mjs) | 几何 → JSON（复用 `src/solid.js`，供原生渲染器使用） |
 | [`tools/render.py`](tools/render.py) | **软件渲染器**：JSON → PNG，无 OpenGL、无浏览器、不联网 |
 | [`tools/viewer.py`](tools/viewer.py) | **原生渲染窗口**：拖动旋转、滚轮缩放、逐圈高亮、导出 PNG |
 | [`docs/spec.md`](docs/spec.md) | 图解语法规范 v0.1：IR、文字语法、符号表、校验规则 |
 | [`docs/architecture.md`](docs/architecture.md) | 架构与数据流逻辑图（Mermaid，GitHub 直接渲染） |
-| [`test/run.js`](test/run.js) | 零依赖测试：62 项，含经典头部序列、图解布局与三维几何不变量 |
+| [`test/run.js`](test/run.js) | 零依赖测试：覆盖耦合守恒、构建与夹紧、校验器、文字与符号图解、三维几何、形状、提示词、力导向、多部件装配 |
 
 ## 跑起来
 
 ```bash
-node test/run.js          # 跑测试，62 项，无需安装任何依赖
+node test/run.js          # 跑测试，无需安装任何依赖
 node scripts/serve.js     # 本地预览，然后打开：
                           #   三维可视化   http://127.0.0.1:5173/web/
                           #   图解可视化   http://127.0.0.1:5173/web/chart.html
 ```
 
-三维页唯一的第三方依赖 **three.js** 通过 importmap 从 CDN 加载（首次打开需联网）；
+三维页唯一的第三方依赖 **three.js** 已随仓库提供（`web/vendor/three.module.js` 与 `web/vendor/addons/`），
+importmap 指向本地路径，**离线可用**，不需要 CDN；
 图解页与所有 `src/` 模块**零依赖**，几何算法可在 Node 里直接测试。
 模块在 `file://` 下会被浏览器拒绝，所以必须走 HTTP —— 这就是 `scripts/serve.js` 存在的原因。
 
@@ -153,8 +157,8 @@ node scripts/serve.js     # 本地预览，然后打开：
 - [x] **v0.3** 三维可视化（实体 + 针目网格 + 逐圈高亮 + 标尺 + 侧视对照）
 - [ ] **v0.4** gauge 标定与回填（钩完两圈量实物 → 校正预览）
 - [ ] **v0.5** 实物照片比对（轮廓叠加 → 差异可视化）
-- [ ] **v0.6** 提示词 → 形状参数（AI 只输出受限 JSON，针数仍由求解器算）
-- [ ] **v0.7** 分件与接缝（头/身/手/脚的多部件拓扑）
+- [x] **v0.6** 提示词 → 形状参数（AI 只输出受限 JSON，针数仍由求解器算）
+- [x] **v0.7** 分件与接缝（头/身/手/脚的多部件拓扑；接缝目前以文字备注给出，尚无逐针缝合图解）
 - [ ] **v0.8** 图片剪影 → 剖面（单图档，复用现有下游）
 - [ ] **v0.9** 照片/多视角 → 网格 → 剖面（最难的一段）
 
